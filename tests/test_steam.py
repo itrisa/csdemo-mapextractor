@@ -8,6 +8,14 @@ from csdemo_mapextractor.steam import public_build
 class SteamTests(unittest.TestCase):
     def test_reads_public_build_from_steamcmd_output(self) -> None:
         output = '''
+"config"
+{
+    "public"
+    {
+        "buildid" "wrong"
+        "timeupdated" "wrong"
+    }
+}
 "branches"
 {
     "public"

@@ -8,7 +8,6 @@ import subprocess
 import time
 
 
-_PUBLIC_BRANCH = re.compile(r'"public"\s*\{')
 _BUILD_ID = re.compile(r'"buildid"\s*"(\d+)"')
 _UPDATED_AT = re.compile(r'"timeupdated"\s*"(\d+)"')
 
@@ -55,9 +54,14 @@ def public_build(steamcmd: str | None = None) -> tuple[str, str]:
 
 
 def _find_public_branch(output: str) -> str:
-    marker = _PUBLIC_BRANCH.search(output)
+    branches = _find_named_block(output, "branches")
+    return _find_named_block(branches, "public")
+
+
+def _find_named_block(output: str, name: str) -> str:
+    marker = re.search(rf'"{re.escape(name)}"\s*\{{', output)
     if marker is None:
-        raise RuntimeError("could not find the CS2 public branch in SteamCMD output")
+        raise RuntimeError(f"could not find {name!r} in SteamCMD output")
     start = output.find("{", marker.start())
     depth = 0
     for position in range(start, len(output)):
@@ -67,4 +71,4 @@ def _find_public_branch(output: str) -> str:
             depth -= 1
             if depth == 0:
                 return output[start + 1 : position]
-    raise RuntimeError("CS2 public branch block is incomplete in SteamCMD output")
+    raise RuntimeError(f"SteamCMD block {name!r} is incomplete")

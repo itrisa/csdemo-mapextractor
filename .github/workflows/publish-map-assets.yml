@@ -24,7 +24,6 @@ jobs:
     timeout-minutes: 360
     env:
       R2_BUCKET: ${{ vars.R2_BUCKET }}
-      R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
       FORCE_REBUILD: ${{ inputs.force || false }}
 
     steps:
@@ -55,11 +54,15 @@ jobs:
           : "${R2_SECRET_ACCESS_KEY:?Set the R2_SECRET_ACCESS_KEY repository secret}"
           : "${R2_ACCOUNT_ID:?Set the R2_ACCOUNT_ID repository secret}"
           : "${R2_BUCKET:?Set the R2_BUCKET repository variable}"
-          : "${R2_PUBLIC_BASE_URL:?Set the R2_PUBLIC_BASE_URL repository variable}"
 
       - name: Determine whether the CS2 build changed
         id: gate
         shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
         run: |
           set -euo pipefail
           build_id="$(csdemo-mapextractor steam-build --key)"
@@ -71,20 +74,24 @@ jobs:
           fi
 
           index="${RUNNER_TEMP}/current-map-index.json"
-          status="$(curl --silent --show-error --output "${index}" --write-out "%{http_code}" \
-            "${R2_PUBLIC_BASE_URL%/}/index.json")"
-          case "${status}" in
-            200)
-              published="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("steam_build_id") or "")' "${index}")"
-              ;;
-            404)
-              published=""
-              ;;
-            *)
-              echo "Unable to read the current map index: HTTP ${status}" >&2
-              exit 1
-              ;;
-          esac
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          count="$(aws s3api list-objects-v2 \
+            --bucket "${R2_BUCKET}" \
+            --prefix index.json \
+            --max-items 1 \
+            --query 'length(Contents[?Key == `index.json`])' \
+            --output text \
+            --endpoint-url "${endpoint}")"
+          if [[ "${count}" == "1" ]]; then
+            aws s3api get-object \
+              --bucket "${R2_BUCKET}" \
+              --key index.json \
+              --endpoint-url "${endpoint}" \
+              "${index}" >/dev/null
+            published="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("steam_build_id") or "")' "${index}")"
+          else
+            published=""
+          fi
 
           if [[ "${published}" == "${build_id}" ]]; then
             echo "changed=false" >> "${GITHUB_OUTPUT}"

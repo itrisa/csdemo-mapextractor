@@ -159,7 +159,7 @@ Configure these GitHub Actions secrets:
 Configure these GitHub Actions variables:
 
 - `R2_BUCKET`, for example `csdemo-maps`
-- `R2_PUBLIC_BASE_URL`, for example `https://maps.example.com`
 
 The R2 token should have Object Read & Write access only to the target bucket.
-Configure the bucket's custom domain and CORS policy separately in Cloudflare.
+Configure the bucket's public custom domain and CORS policy separately in
+Cloudflare; the workflow uses the authenticated S3 endpoint for build gating.
