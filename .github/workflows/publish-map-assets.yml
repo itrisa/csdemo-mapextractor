@@ -73,25 +73,10 @@ jobs:
             exit 0
           fi
 
-          index="${RUNNER_TEMP}/current-map-index.json"
           endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          count="$(aws s3api list-objects-v2 \
+          published="$(csdemo-mapextractor r2-current-build \
             --bucket "${R2_BUCKET}" \
-            --prefix index.json \
-            --max-items 1 \
-            --query 'length(Contents[?Key == `index.json`])' \
-            --output text \
             --endpoint-url "${endpoint}")"
-          if [[ "${count}" == "1" ]]; then
-            aws s3api get-object \
-              --bucket "${R2_BUCKET}" \
-              --key index.json \
-              --endpoint-url "${endpoint}" \
-              "${index}" >/dev/null
-            published="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("steam_build_id") or "")' "${index}")"
-          else
-            published=""
-          fi
 
           if [[ "${published}" == "${build_id}" ]]; then
             echo "changed=false" >> "${GITHUB_OUTPUT}"

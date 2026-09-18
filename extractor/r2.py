@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import subprocess
+import tempfile
 from typing import Any
 
 
@@ -18,6 +19,45 @@ _CONTENT_TYPES = {
 }
 _IMMUTABLE_CACHE = "public, max-age=31536000, immutable"
 _ROOT_CACHE = "public, max-age=300, must-revalidate"
+
+
+def current_build(
+    *,
+    bucket: str,
+    endpoint_url: str,
+    aws: str = "aws",
+    profile: str | None = None,
+) -> str | None:
+    common = ["--endpoint-url", endpoint_url]
+    if profile is not None:
+        common.extend(("--profile", profile))
+    if _object_metadata(aws, common, bucket, "index.json") is None:
+        return None
+    with tempfile.TemporaryDirectory(prefix="csdemo-r2-index-") as temporary:
+        output = Path(temporary) / "index.json"
+        subprocess.run(
+            [
+                aws,
+                "s3api",
+                "get-object",
+                "--bucket",
+                bucket,
+                "--key",
+                "index.json",
+                str(output),
+                *common,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        index = _read_json(output)
+    build_id = index.get("steam_build_id")
+    if build_id is None:
+        return None
+    if not isinstance(build_id, str) or not build_id.isdecimal():
+        raise ValueError("root index contains an invalid steam_build_id")
+    return build_id
 
 
 def publish(

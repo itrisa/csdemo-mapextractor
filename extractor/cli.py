@@ -101,6 +101,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     publish_parser.add_argument("--profile")
     publish_parser.add_argument("--force", action="store_true")
 
+    current_parser = subparsers.add_parser("r2-current-build")
+    current_parser.add_argument("--bucket", required=True)
+    current_parser.add_argument("--endpoint-url", required=True)
+    current_parser.add_argument("--aws", default="aws")
+    current_parser.add_argument("--profile")
+
     arguments = parser.parse_args(argv)
     if arguments.command == "doctor":
         return _doctor(arguments)
@@ -136,6 +142,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             force=arguments.force,
         )
         print(json.dumps(result, indent=2))
+        return 0
+    if arguments.command == "r2-current-build":
+        build_id = r2.current_build(
+            bucket=arguments.bucket,
+            endpoint_url=arguments.endpoint_url,
+            aws=arguments.aws,
+            profile=arguments.profile,
+        )
+        print(build_id or "")
         return 0
     geometry = _read_geometry(arguments.artifact)
     details = _describe(geometry, arguments.artifact.suffix.lower())
