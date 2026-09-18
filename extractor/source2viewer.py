@@ -8,9 +8,19 @@ import re
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 
 
 _MAP_NAME = re.compile(r"[A-Za-z0-9_]+")
+_QUOTED_KEY = re.compile(r'"([^"]+)"\s*\{')
+
+
+@dataclass(frozen=True, slots=True)
+class MapAssets:
+    overview: bytes | None
+    logo: bytes | None
+    radars: dict[str, bytes]
+    missing: tuple[str, ...] = ()
 
 
 def resolve(executable: Path | None = None) -> Path:
@@ -109,6 +119,178 @@ def extract_entity_data(executable: Path, cs2_dir: Path, map_name: str) -> str:
     return completed.stdout
 
 
+def list_map_asset_resources(executable: Path, cs2_dir: Path) -> frozenset[str]:
+    vpk = cs2_dir / "game" / "csgo" / "pak01_dir.vpk"
+    if not vpk.is_file():
+        raise FileNotFoundError(f"CS2 VPK was not found: {vpk}")
+    completed = subprocess.run(
+        [
+            str(executable),
+            "-i",
+            str(vpk),
+            "-l",
+            "-f",
+            ",".join(
+                (
+                    "resource/overviews/",
+                    "panorama/images/overheadmaps/",
+                    "panorama/images/map_icons/",
+                )
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    return frozenset(
+        line.partition(" CRC:")[0].strip().replace("\\", "/")
+        for line in completed.stdout.splitlines()
+        if " CRC:" in line
+    )
+
+
+def extract_map_assets(
+    executable: Path,
+    cs2_dir: Path,
+    map_name: str,
+    *,
+    available_resources: frozenset[str] | None = None,
+) -> MapAssets:
+    _validate_map_name(map_name)
+    csgo_dir = cs2_dir / "game" / "csgo"
+    vpk = csgo_dir / "pak01_dir.vpk"
+    if not vpk.is_file():
+        raise FileNotFoundError(f"CS2 VPK was not found: {vpk}")
+    available = (
+        available_resources
+        if available_resources is not None
+        else list_map_asset_resources(executable, cs2_dir)
+    )
+    missing = []
+
+    overview_path = f"resource/overviews/{map_name}.txt"
+    if overview_path in available:
+        overview = _extract_resource(
+            executable,
+            vpk,
+            overview_path,
+            Path(overview_path),
+            decompile=False,
+        )
+        sections = _vertical_sections(overview.decode("utf-8", errors="replace"))
+    else:
+        overview = None
+        sections = ()
+        missing.append("overview")
+    radar_names = ("default", *(section for section in sections if section != "default"))
+    radars = {}
+    for section in radar_names:
+        suffix = "" if section == "default" else f"_{section}"
+        internal_path = (
+            f"panorama/images/overheadmaps/{map_name}{suffix}_radar_psd.vtex_c"
+        )
+        if internal_path in available:
+            radars[section] = _extract_resource(
+                executable,
+                vpk,
+                internal_path,
+                Path(internal_path.removesuffix(".vtex_c") + ".png"),
+                decompile=True,
+            )
+        else:
+            missing.append(f"radar:{section}")
+
+    logo_path = f"panorama/images/map_icons/map_icon_{map_name}.vsvg_c"
+    logo = (
+        _extract_resource(
+            executable,
+            vpk,
+            logo_path,
+            Path(logo_path.removesuffix(".vsvg_c") + ".svg"),
+            decompile=True,
+        )
+        if logo_path in available
+        else None
+    )
+    if logo is None:
+        missing.append("logo")
+    return MapAssets(
+        overview=overview,
+        logo=logo,
+        radars=radars,
+        missing=tuple(missing),
+    )
+
+
+def _vertical_sections(overview: str) -> tuple[str, ...]:
+    content = re.sub(r"//.*$", "", overview, flags=re.MULTILINE)
+    marker = re.search(r'"verticalsections"\s*\{', content, flags=re.IGNORECASE)
+    if marker is None:
+        return ()
+    start = content.find("{", marker.start())
+    depth = 0
+    sections = []
+    position = start
+    while position < len(content):
+        character = content[position]
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        elif character == '"' and depth == 1:
+            match = _QUOTED_KEY.match(content, position)
+            if match is not None:
+                section = match.group(1).lower()
+                if _MAP_NAME.fullmatch(section) is None:
+                    raise RuntimeError(
+                        f"invalid vertical radar section name: {section}"
+                    )
+                sections.append(section)
+                position = match.end() - 1
+                continue
+        position += 1
+    return tuple(sections)
+
+
+def _extract_resource(
+    executable: Path,
+    vpk: Path,
+    internal_path: str,
+    output_relative: Path,
+    *,
+    decompile: bool,
+) -> bytes:
+    with tempfile.TemporaryDirectory(prefix="csdemo-mapextractor-") as temporary:
+        output_dir = Path(temporary)
+        command = [
+            str(executable),
+            "-i",
+            str(vpk),
+            "-f",
+            internal_path,
+            "-o",
+            str(output_dir),
+        ]
+        if decompile:
+            command.append("-d")
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        output = output_dir / output_relative
+        if not output.is_file():
+            raise RuntimeError(
+                f"Source2Viewer did not produce {output_relative} from {internal_path}"
+            )
+        return output.read_bytes()
+
+
 def _extract_glb(
     executable: Path,
     vpk: Path,
@@ -159,3 +341,8 @@ def cs2_client_version(cs2_dir: Path) -> str | None:
         if separator and key.strip() == "ClientVersion":
             return value.strip() or None
     return None
+
+
+def _validate_map_name(map_name: str) -> None:
+    if _MAP_NAME.fullmatch(map_name) is None:
+        raise ValueError("map name may contain only letters, numbers, and underscores")

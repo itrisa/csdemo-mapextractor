@@ -19,8 +19,9 @@ meshopt = [
 [project.scripts]
 csdemo-mapextractor = "csdemo_mapextractor.cli:main"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.setuptools]
+packages = ["csdemo_mapextractor"]
+package-dir = { csdemo_mapextractor = "extractor" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

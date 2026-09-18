@@ -14,10 +14,13 @@ from . import glb
 from .comparison import compare
 from .geometry import CollisionGeometry
 from .entity_data import parse_states
-from .layered import dumps as dumps_layered, entity_layers, from_vrf
+from .layered import CollisionLayer, dumps as dumps_layered, entity_layers, from_vrf
 from .manifest import create as create_manifest
 from .profiles import ALL_PHYSICS, AWPY_DEFAULT, VISUAL_OCCLUDERS
+from . import r2
+from . import release
 from . import source2viewer
+from . import steam
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -67,6 +70,37 @@ def main(argv: Sequence[str] | None = None) -> int:
     cache_parser.add_argument("--all-layers", action="store_true")
     cache_parser.add_argument("--force", action="store_true")
 
+    assets_parser = subparsers.add_parser("extract-assets")
+    assets_parser.add_argument("--cs2-dir", type=Path, required=True)
+    assets_parser.add_argument("--maps", nargs="+", required=True)
+    assets_parser.add_argument("--output-dir", type=Path, default=Path("out"))
+    assets_parser.add_argument("--source2viewer", type=Path)
+    assets_parser.add_argument("--force", action="store_true")
+
+    discover_parser = subparsers.add_parser("discover-maps")
+    discover_parser.add_argument("--cs2-dir", type=Path, required=True)
+
+    steam_parser = subparsers.add_parser("steam-build")
+    steam_parser.add_argument("--steamcmd")
+    steam_parser.add_argument("--key", action="store_true")
+
+    release_parser = subparsers.add_parser("build-release")
+    release_parser.add_argument("--cs2-dir", type=Path, required=True)
+    release_parser.add_argument("--maps", nargs="+")
+    release_parser.add_argument("--output-dir", type=Path, default=Path("out") / "release")
+    release_parser.add_argument("--source2viewer", type=Path)
+    release_parser.add_argument("--steam-build-id")
+    release_parser.add_argument("--all-layers", action="store_true")
+    release_parser.add_argument("--force", action="store_true")
+
+    publish_parser = subparsers.add_parser("publish-r2")
+    publish_parser.add_argument("--release-dir", type=Path, default=Path("out") / "release")
+    publish_parser.add_argument("--bucket", required=True)
+    publish_parser.add_argument("--endpoint-url", required=True)
+    publish_parser.add_argument("--aws", default="aws")
+    publish_parser.add_argument("--profile")
+    publish_parser.add_argument("--force", action="store_true")
+
     arguments = parser.parse_args(argv)
     if arguments.command == "doctor":
         return _doctor(arguments)
@@ -79,6 +113,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if arguments.command == "cache-maps":
         return _cache_maps(arguments)
+    if arguments.command == "extract-assets":
+        return _extract_assets(arguments)
+    if arguments.command == "discover-maps":
+        print("\n".join(release.discover_maps(arguments.cs2_dir)))
+        return 0
+    if arguments.command == "steam-build":
+        build_id, updated_at = steam.public_build(arguments.steamcmd)
+        print(build_id if arguments.key else json.dumps(
+            {"buildid": build_id, "timeupdated": updated_at}, indent=2
+        ))
+        return 0
+    if arguments.command == "build-release":
+        return _build_release(arguments)
+    if arguments.command == "publish-r2":
+        result = r2.publish(
+            arguments.release_dir,
+            bucket=arguments.bucket,
+            endpoint_url=arguments.endpoint_url,
+            aws=arguments.aws,
+            profile=arguments.profile,
+            force=arguments.force,
+        )
+        print(json.dumps(result, indent=2))
+        return 0
     geometry = _read_geometry(arguments.artifact)
     details = _describe(geometry, arguments.artifact.suffix.lower())
     details["valid"] = True
@@ -215,6 +273,109 @@ def _cache_maps(arguments: argparse.Namespace) -> int:
     temporary_index.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
     temporary_index.replace(index_path)
     print(json.dumps(index, indent=2))
+    return 0
+
+
+def _extract_assets(arguments: argparse.Namespace) -> int:
+    executable = source2viewer.resolve(arguments.source2viewer)
+    available_resources = source2viewer.list_map_asset_resources(
+        executable, arguments.cs2_dir
+    )
+    outputs_by_map: list[tuple[str, Path, dict[str, Path], tuple[str, ...]]] = []
+    for map_name in arguments.maps:
+        map_dir = arguments.output_dir / map_name
+        paths = {
+            "overview": map_dir / "overview.txt",
+            "logo": map_dir / "logo.svg",
+        }
+        existing = [
+            path
+            for path in (*paths.values(), *map_dir.glob("radar*.png"))
+            if path.exists()
+        ]
+        if existing and not arguments.force:
+            raise SystemExit(
+                f"refusing to overwrite {existing[0]}; pass --force"
+            )
+        assets = source2viewer.extract_map_assets(
+            executable,
+            arguments.cs2_dir,
+            map_name,
+            available_resources=available_resources,
+        )
+        for section in assets.radars:
+            filename = "radar.png" if section == "default" else f"radar_{section}.png"
+            paths[f"radar:{section}"] = map_dir / filename
+        if arguments.force:
+            expected = set(paths.values())
+            for stale in map_dir.glob("radar*.png"):
+                if stale not in expected:
+                    stale.unlink()
+        payloads = {
+            **{
+                paths[f"radar:{section}"]: data
+                for section, data in assets.radars.items()
+            },
+        }
+        if assets.overview is not None:
+            payloads[paths["overview"]] = assets.overview
+        else:
+            if arguments.force and paths["overview"].exists():
+                paths["overview"].unlink()
+            del paths["overview"]
+        if assets.logo is not None:
+            payloads[paths["logo"]] = assets.logo
+        else:
+            if arguments.force and paths["logo"].exists():
+                paths["logo"].unlink()
+            del paths["logo"]
+        map_dir.mkdir(parents=True, exist_ok=True)
+        for output, data in payloads.items():
+            temporary = output.with_suffix(output.suffix + ".tmp")
+            temporary.write_bytes(data)
+            temporary.replace(output)
+        outputs_by_map.append((map_name, map_dir, paths, assets.missing))
+
+    result = {
+        "format": "cs2-map-assets-v1",
+        "source2viewer_version": source2viewer.version(executable),
+        "cs2_client_version": source2viewer.cs2_client_version(arguments.cs2_dir),
+        "maps": [
+            {
+                "name": map_name,
+                "directory": str(map_dir),
+                "missing_assets": list(missing),
+                "files": {
+                    name: {
+                        "path": str(path),
+                        "bytes": path.stat().st_size,
+                        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    }
+                    for name, path in paths.items()
+                },
+            }
+            for map_name, map_dir, paths, missing in outputs_by_map
+        ],
+    }
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def _build_release(arguments: argparse.Namespace) -> int:
+    executable = source2viewer.resolve(arguments.source2viewer)
+    result = release.build_release(
+        arguments.cs2_dir,
+        executable,
+        arguments.output_dir,
+        maps=arguments.maps,
+        steam_build_id=arguments.steam_build_id,
+        all_layers=arguments.all_layers,
+        force=arguments.force,
+    )
+    print(json.dumps({
+        "directory": str(result.version_directory),
+        **result.root_index,
+    }, indent=2))
     return 0
 
 

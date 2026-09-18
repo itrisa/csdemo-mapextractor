@@ -5,6 +5,7 @@ Produce deterministic collision geometry artifacts from a local Counter-Strike
 
 - Source2Viewer-CLI discovery and version checks;
 - `world_physics.vmdl_c` extraction from a map VPK;
+- radar, overview metadata, and map-logo extraction from the main CS2 VPK;
 - explicit `visual-occluders-v1` and `all-physics-v1` GLB selection profiles;
 - exact float32 vertex welding and indexed geometry;
 - minimal uncompressed GLB and legacy little-endian `.tri` output;
@@ -45,6 +46,20 @@ csdemo-mapextractor extract `
 Meshopt output keeps float32 positions and index sequences byte-exact. It uses
 `ATTRIBUTES` and `INDICES` modes with no quantization, reordering, or filters.
 
+Extract radar images, overview metadata, and map logos:
+
+```powershell
+csdemo-mapextractor extract-assets `
+	--cs2-dir "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive" `
+	--source2viewer "C:\tools\Source2Viewer-CLI.exe" `
+	--maps de_mirage de_nuke
+```
+
+Assets are written to `out\<map>\` by default. Each directory contains
+`radar.png`, `logo.svg`, and `overview.txt`. Maps with vertical sections also
+contain files such as `radar_lower.png`. Use `--output-dir` to select another
+root and `--force` to overwrite existing assets.
+
 Build client caches containing default world collision and enabled ordinary
 `func_brush` entities using:
 
@@ -77,3 +92,74 @@ reports exact triangle-multiset overlap between any two supported artifacts.
 the extractor rejects GLBs without this metadata rather than treating material
 filtering as equivalent. The profile preserves Hammer coordinates and does not
 apply VRF's node transform to glTF meters and Y-up.
+
+## Automated releases
+
+Build a complete, versioned browser release from every supported map VPK:
+
+```powershell
+csdemo-mapextractor build-release `
+	--cs2-dir "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive" `
+	--source2viewer "C:\tools\Source2Viewer-CLI.exe" `
+	--output-dir out\release `
+	--steam-build-id 25218825
+```
+
+Map names are discovered from `game\csgo\maps\*.vpk`. Names containing
+`_preview`, `_vanity`, `lobby_`, or `graphics_` are excluded. Pass `--maps`
+to build an explicit subset. The output layout is:
+
+```text
+out/release/
+|-- index.json
+`-- v1/<ClientVersion>-<SteamBuildId>/
+    |-- index.json
+    `-- maps/<map>/
+        |-- collision.glb
+        |-- logo.svg
+        |-- overview.txt
+        |-- radar.png
+        `-- radar_<section>.png
+```
+
+The version manifest contains per-file sizes and SHA-256 checksums. Missing
+optional visual assets are recorded per map. Files below
+`v1/<ClientVersion>-<SteamBuildId>/` are immutable; the root `index.json`
+identifies the current release.
+
+Publish a completed release through Cloudflare R2's S3-compatible endpoint:
+
+```powershell
+$env:AWS_ACCESS_KEY_ID = "<R2 access key>"
+$env:AWS_SECRET_ACCESS_KEY = "<R2 secret key>"
+$env:AWS_DEFAULT_REGION = "auto"
+
+csdemo-mapextractor publish-r2 `
+	--release-dir out\release `
+	--bucket csdemo-maps `
+	--endpoint-url "https://<account-id>.r2.cloudflarestorage.com"
+```
+
+The publisher validates every manifest checksum, uploads and verifies every
+versioned object, and updates the root index last. A matching partial upload is
+safe to resume. Existing version manifests with different content are not
+replaced unless `--force` is supplied.
+
+The scheduled workflow in `.github/workflows/publish-map-assets.yml` obtains
+CS2 anonymously through SteamCMD, skips builds already present in the public
+root index, installs a checksum-pinned Linux Source2Viewer CLI, builds the
+release, and publishes it to R2.
+
+Configure these GitHub Actions secrets:
+
+- `R2_ACCESS_KEY_ID`
+- `R2_SECRET_ACCESS_KEY`
+- `R2_ACCOUNT_ID`
+
+Configure these GitHub Actions variables:
+
+- `R2_BUCKET`, for example `csdemo-maps`
+- `R2_PUBLIC_BASE_URL`, for example `https://maps.example.com`
+
+The R2 token should have Object Read & Write access only to the target bucket.
+Configure the bucket's custom domain and CORS policy separately in Cloudflare.

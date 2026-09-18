@@ -4,7 +4,14 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from csdemo_mapextractor.source2viewer import extract_entity_data, extract_entity_physics, extract_world_physics, version
+from csdemo_mapextractor.source2viewer import (
+    extract_entity_data,
+    extract_entity_physics,
+    extract_map_assets,
+    extract_world_physics,
+    list_map_asset_resources,
+    version,
+)
 
 
 class Source2ViewerTests(unittest.TestCase):
@@ -86,6 +93,118 @@ class Source2ViewerTests(unittest.TestCase):
             self.assertIn("m_entityKeyValues", output)
             self.assertIn("--block", run.call_args.args[0])
             self.assertNotIn("-o", run.call_args.args[0])
+
+    def test_extracts_radar_sections_logo_and_overview(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cs2_dir = Path(directory)
+            vpk = cs2_dir / "game" / "csgo" / "pak01_dir.vpk"
+            vpk.parent.mkdir(parents=True)
+            vpk.write_bytes(b"vpk")
+            overview = b'''
+"de_nuke"
+{
+    "material" "overviews/de_nuke"
+    "verticalsections"
+    {
+        "default" { "AltitudeMax" "10000" }
+        "lower" { "AltitudeMax" "-495" }
+    }
+}
+'''
+
+            def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+                output_dir = Path(command[command.index("-o") + 1])
+                internal_path = command[command.index("-f") + 1]
+                outputs = {
+                    "resource/overviews/de_nuke.txt": (
+                        Path("resource/overviews/de_nuke.txt"),
+                        overview,
+                    ),
+                    "panorama/images/overheadmaps/de_nuke_radar_psd.vtex_c": (
+                        Path("panorama/images/overheadmaps/de_nuke_radar_psd.png"),
+                        b"upper",
+                    ),
+                    "panorama/images/overheadmaps/de_nuke_lower_radar_psd.vtex_c": (
+                        Path("panorama/images/overheadmaps/de_nuke_lower_radar_psd.png"),
+                        b"lower",
+                    ),
+                    "panorama/images/map_icons/map_icon_de_nuke.vsvg_c": (
+                        Path("panorama/images/map_icons/map_icon_de_nuke.svg"),
+                        b"<svg/>",
+                    ),
+                }
+                relative, data = outputs[internal_path]
+                output = output_dir / relative
+                output.parent.mkdir(parents=True)
+                output.write_bytes(data)
+                return subprocess.CompletedProcess(command, 0)
+
+            with patch(
+                "csdemo_mapextractor.source2viewer.subprocess.run",
+                side_effect=fake_run,
+            ) as run:
+                assets = extract_map_assets(
+                    Path("tool"),
+                    cs2_dir,
+                    "de_nuke",
+                    available_resources=frozenset(
+                        (
+                            "resource/overviews/de_nuke.txt",
+                            "panorama/images/overheadmaps/de_nuke_radar_psd.vtex_c",
+                            "panorama/images/overheadmaps/de_nuke_lower_radar_psd.vtex_c",
+                            "panorama/images/map_icons/map_icon_de_nuke.vsvg_c",
+                        )
+                    ),
+                )
+
+            self.assertEqual(overview, assets.overview)
+            self.assertEqual(b"<svg/>", assets.logo)
+            self.assertEqual({"default": b"upper", "lower": b"lower"}, assets.radars)
+            self.assertEqual(4, run.call_count)
+            self.assertNotIn("-d", run.call_args_list[0].args[0])
+            self.assertIn("-d", run.call_args_list[1].args[0])
+
+    def test_lists_available_map_asset_resources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cs2_dir = Path(directory)
+            vpk = cs2_dir / "game" / "csgo" / "pak01_dir.vpk"
+            vpk.parent.mkdir(parents=True)
+            vpk.write_bytes(b"vpk")
+            completed = subprocess.CompletedProcess(
+                ["tool"],
+                0,
+                stdout=(
+                    "resource/overviews/de_mirage.txt CRC:001 size:10\n"
+                    "panorama/images/map_icons/map_icon_de_mirage.vsvg_c CRC:002 size:20\n"
+                ),
+            )
+            with patch(
+                "csdemo_mapextractor.source2viewer.subprocess.run",
+                return_value=completed,
+            ) as run:
+                resources = list_map_asset_resources(Path("tool"), cs2_dir)
+
+            self.assertIn("resource/overviews/de_mirage.txt", resources)
+            self.assertIn("-l", run.call_args.args[0])
+
+    def test_records_unavailable_optional_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cs2_dir = Path(directory)
+            vpk = cs2_dir / "game" / "csgo" / "pak01_dir.vpk"
+            vpk.parent.mkdir(parents=True)
+            vpk.write_bytes(b"vpk")
+
+            assets = extract_map_assets(
+                Path("tool"),
+                cs2_dir,
+                "ar_pool_day",
+                available_resources=frozenset(),
+            )
+
+            self.assertIsNone(assets.overview)
+            self.assertIsNone(assets.logo)
+            self.assertEqual({}, assets.radars)
+            self.assertEqual(("overview", "radar:default", "logo"), assets.missing)
 
     def test_parses_version_identifier_from_diagnostic_output(self) -> None:
         completed = subprocess.CompletedProcess(
