@@ -1,113 +1,79 @@
 # csdemo-mapextractor
 
-Produce deterministic collision geometry artifacts from a local Counter-Strike
-2 installation. The current vertical slice provides:
+Extract browser-ready map data from a local Counter-Strike 2 installation.
 
-- Source2Viewer-CLI discovery and version checks;
-- `world_physics.vmdl_c` extraction from a map VPK;
-- radar, overview metadata, and map-logo extraction from the main CS2 VPK;
-- explicit `visual-occluders-v1` and `all-physics-v1` GLB selection profiles;
-- exact float32 vertex welding and indexed geometry;
-- minimal uncompressed GLB and legacy little-endian `.tri` output;
-- a JSON manifest containing bounds, counts, profile, versions, and checksum.
+For each map, the extractor can produce:
 
-Python 3.11 or newer is required. Install the package locally with:
+- collision geometry as GLB;
+- radar images, including vertical sections such as `lower`;
+- overview metadata;
+- the map logo as SVG.
 
-```powershell
-python -m pip install -e .
-```
+It uses [Source2Viewer](https://github.com/ValveResourceFormat/ValveResourceFormat)
+to read CS2's Source 2 files.
 
-Install the optional lossless Meshopt encoder with:
+## Requirements
+
+- Python 3.11 or newer
+- Counter-Strike 2
+- Source2Viewer CLI
+
+Install the project with Meshopt support:
 
 ```powershell
 python -m pip install -e ".[meshopt]"
 ```
 
-Check the local tools and CS2 layout:
+Check that the extractor can find CS2 and Source2Viewer:
 
 ```powershell
 csdemo-mapextractor doctor `
-	--cs2-dir "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive" `
-	--source2viewer "C:\tools\Source2Viewer-CLI.exe"
+  --cs2-dir "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive" `
+  --source2viewer "C:\tools\Source2Viewer-CLI.exe"
 ```
 
-Extract one map to either `.glb` or `.tri` based on the output extension:
+## Extract a map
+
+Extract collision geometry:
 
 ```powershell
 csdemo-mapextractor extract `
-	--cs2-dir "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive" `
-	--source2viewer "C:\tools\Source2Viewer-CLI.exe" `
-	--map de_mirage `
-	--profile visual-occluders-v1 `
-	--meshopt `
-	--output out\de_mirage.glb
+  --cs2-dir "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive" `
+  --source2viewer "C:\tools\Source2Viewer-CLI.exe" `
+  --map de_mirage `
+  --profile visual-occluders-v1 `
+  --meshopt `
+  --output out\de_mirage.glb
 ```
 
-Meshopt output keeps float32 positions and index sequences byte-exact. It uses
-`ATTRIBUTES` and `INDICES` modes with no quantization, reordering, or filters.
-
-Extract radar images, overview metadata, and map logos:
+Extract radar images, overview metadata, and logos:
 
 ```powershell
 csdemo-mapextractor extract-assets `
-	--cs2-dir "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive" `
-	--source2viewer "C:\tools\Source2Viewer-CLI.exe" `
-	--maps de_mirage de_nuke
+  --cs2-dir "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive" `
+  --source2viewer "C:\tools\Source2Viewer-CLI.exe" `
+  --maps de_mirage de_nuke
 ```
 
-Assets are written to `out\<map>\` by default. Each directory contains
-`radar.png`, `logo.svg`, and `overview.txt`. Maps with vertical sections also
-contain files such as `radar_lower.png`. Use `--output-dir` to select another
-root and `--force` to overwrite existing assets.
+Visual assets are written to `out\<map>\`. Use `--force` to replace existing
+files.
 
-Build client caches containing default world collision and enabled ordinary
-`func_brush` entities using:
+The CLI also includes `convert`, `inspect`, `validate`, and `compare` commands
+for working with GLB and legacy `.tri` files.
 
-```powershell
-csdemo-mapextractor cache-maps `
-	--cs2-dir "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive" `
-	--source2viewer "C:\tools\Source2Viewer-CLI.exe" `
-	--maps de_mirage de_inferno de_dust2 de_ancient `
-	--output-dir out\maps
-```
+## Build a browser release
 
-Pass `--all-layers` to retain every collision group for inspection.
-
-Layered caches also include `func_brush` physics from each map's
-`default_ents.vents_c`. Entity transforms are baked into Hammer Z-up world
-coordinates before compression. Interaction-tag variants such as
-`entity:func_brush:npcclip+playerclip` are separate layers, allowing large clip
-volumes to be hidden without removing ordinary solid brushes.
-
-The cache also reads the entity lump's `DATA` block and follows Source2Viewer's
-default visibility rule: entities with `startdisabled=true` or `enabled=false`
-are excluded from the cached `func_brush` layers.
-
-Existing `.tri` and minimal `.glb` artifacts can be converted, inspected, and
-validated with the `convert`, `inspect`, and `validate` commands. `compare`
-reports exact triangle-multiset overlap between any two supported artifacts.
-
-`awpy-default-v1` selects VRF physics meshes named `physics_group` or
-`physics_group_<surface>`. VRF derives those names from PHYS collision groups;
-the extractor rejects GLBs without this metadata rather than treating material
-filtering as equivalent. The profile preserves Hammer coordinates and does not
-apply VRF's node transform to glTF meters and Y-up.
-
-## Automated releases
-
-Build a complete, versioned browser release from every supported map VPK:
+Build every supported map into a versioned release:
 
 ```powershell
 csdemo-mapextractor build-release `
-	--cs2-dir "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive" `
-	--source2viewer "C:\tools\Source2Viewer-CLI.exe" `
-	--output-dir out\release `
-	--steam-build-id 25218825
+  --cs2-dir "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive" `
+  --source2viewer "C:\tools\Source2Viewer-CLI.exe" `
+  --steam-build-id 25218825
 ```
 
-Map names are discovered from `game\csgo\maps\*.vpk`. Names containing
-`_preview`, `_vanity`, `lobby_`, or `graphics_` are excluded. Pass `--maps`
-to build an explicit subset. The output layout is:
+Maps are discovered automatically from the CS2 installation. The result looks
+like this:
 
 ```text
 out/release/
@@ -122,50 +88,74 @@ out/release/
         `-- radar_<section>.png
 ```
 
-The version manifest contains per-file sizes and SHA-256 checksums. Missing
-optional visual assets are recorded per map. Files below
-`v1/<ClientVersion>-<SteamBuildId>/` are immutable; the root `index.json`
-identifies the current release.
+Each manifest includes file sizes and SHA-256 checksums. Version folders are
+immutable; the root `index.json` points to the current release.
 
-Publish a completed release through Cloudflare R2's S3-compatible endpoint:
+## Use the release from a client
+
+The client only needs a stable public base URL. It first fetches the root
+`index.json`, then follows its `manifest` field:
+
+```ts
+const MAP_ASSET_BASE_URL = "https://maps.example.com/";
+const rootUrl = new URL("index.json", MAP_ASSET_BASE_URL);
+const root = await fetch(rootUrl).then((response) => response.json());
+
+const manifestUrl = new URL(root.manifest, rootUrl);
+const release = await fetch(manifestUrl).then((response) => response.json());
+
+const map = release.maps.find(({ name }) => name === "de_mirage");
+const collisionUrl = new URL(map.files.collision.path, manifestUrl);
+```
+
+This keeps the client independent of Steam build IDs and version-folder names.
+
+## Publish to Cloudflare R2
+
+Set credentials for an R2 token limited to the target bucket:
 
 ```powershell
 $env:AWS_ACCESS_KEY_ID = "<R2 access key>"
 $env:AWS_SECRET_ACCESS_KEY = "<R2 secret key>"
 $env:AWS_DEFAULT_REGION = "auto"
-
-csdemo-mapextractor publish-r2 `
-	--release-dir out\release `
-	--bucket csdemo-maps `
-	--endpoint-url "https://<account-id>.r2.cloudflarestorage.com"
 ```
 
-The publisher validates every manifest checksum, uploads and verifies every
-versioned object, and updates the root index last. A matching partial upload is
-safe to resume. Existing version manifests with different content are not
-replaced unless `--force` is supplied.
+Publish the release:
 
-The scheduled workflow in `.github/workflows/publish-map-assets.yml` obtains
-CS2 anonymously through SteamCMD, skips builds already present in the public
-root index, installs a checksum-pinned Linux Source2Viewer CLI, builds the
-release, and publishes it to R2.
+```powershell
+csdemo-mapextractor publish-r2 `
+  --bucket csdemo-maps `
+  --endpoint-url "https://<account-id>.r2.cloudflarestorage.com"
+```
 
-The workflow isolates untrusted tooling from storage credentials: SteamCMD and
-the extractor run in jobs without R2 secrets, while the gate and publication
-jobs use only Python's standard library and the runner-provided AWS CLI.
-Dependencies used to build assets are version- and hash-locked. The build job
-requires at least 75 GiB of free runner storage before downloading CS2.
+The publisher validates and verifies every file before replacing the root
+index. Interrupted uploads can be resumed safely.
 
-Configure these GitHub Actions secrets:
+Configure a public custom domain and CORS policy for the bucket in Cloudflare.
+The S3 endpoint above is only used for authenticated publication.
+
+## GitHub Actions
+
+[The publication workflow](.github/workflows/publish-map-assets.yml) checks for
+new CS2 builds each day and can also be started manually. It downloads CS2,
+builds the release, and publishes it to R2.
+
+Add these repository secrets:
 
 - `R2_ACCESS_KEY_ID`
 - `R2_SECRET_ACCESS_KEY`
 - `R2_ACCOUNT_ID`
 
-Configure these GitHub Actions variables:
+Add one repository variable:
 
-- `R2_BUCKET`, for example `csdemo-maps`
+- `R2_BUCKET`
 
-The R2 token should have Object Read & Write access only to the target bucket.
-Configure the bucket's public custom domain and CORS policy separately in
-Cloudflare; the workflow uses the authenticated S3 endpoint for build gating.
+SteamCMD and extraction run without R2 credentials, and their dependencies are
+hash-locked. Only a validated build artifact reaches the separate publication
+job.
+
+## License
+
+The extractor is available under the [MIT License](LICENSE). Counter-Strike 2
+and its assets belong to Valve; this license does not grant rights to
+redistribute Valve's content.
