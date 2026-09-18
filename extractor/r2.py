@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import subprocess
 import tempfile
-from typing import Any
+from typing import Any, Sequence
 
 
 _CONTENT_TYPES = {
@@ -283,3 +284,41 @@ def _safe_relative_path(value: str) -> Path:
     if posix.is_absolute() or ".." in posix.parts or "\\" in value:
         raise ValueError(f"unsafe release path: {value}")
     return Path(*posix.parts)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    current_parser = subparsers.add_parser("current-build")
+    publish_parser = subparsers.add_parser("publish")
+    for command_parser in (current_parser, publish_parser):
+        command_parser.add_argument("--bucket", required=True)
+        command_parser.add_argument("--endpoint-url", required=True)
+        command_parser.add_argument("--aws", default="aws")
+        command_parser.add_argument("--profile")
+    publish_parser.add_argument("--release-dir", type=Path, required=True)
+    publish_parser.add_argument("--force", action="store_true")
+    arguments = parser.parse_args(argv)
+    if arguments.command == "current-build":
+        build_id = current_build(
+            bucket=arguments.bucket,
+            endpoint_url=arguments.endpoint_url,
+            aws=arguments.aws,
+            profile=arguments.profile,
+        )
+        print(build_id or "")
+        return 0
+    result = publish(
+        arguments.release_dir,
+        bucket=arguments.bucket,
+        endpoint_url=arguments.endpoint_url,
+        aws=arguments.aws,
+        profile=arguments.profile,
+        force=arguments.force,
+    )
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

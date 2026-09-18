@@ -4,9 +4,11 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest.mock import patch
 
-from csdemo_mapextractor.r2 import current_build, publish
+from csdemo_mapextractor.r2 import current_build, main, publish
 
 
 class R2Tests(unittest.TestCase):
@@ -109,6 +111,67 @@ class R2Tests(unittest.TestCase):
             self.assertEqual("v1/2000908/index.json", uploads[-2])
             self.assertEqual(3, len(uploads))
             self.assertEqual("v1/2000908/index.json", result["manifest"])
+
+    def test_standalone_current_build_output(self) -> None:
+        output = StringIO()
+        with (
+            patch(
+                "csdemo_mapextractor.r2.current_build",
+                return_value="25218825",
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                0,
+                main(
+                    [
+                        "current-build",
+                        "--bucket",
+                        "maps",
+                        "--endpoint-url",
+                        "https://account.r2.cloudflarestorage.com",
+                    ]
+                ),
+            )
+
+        self.assertEqual("25218825\n", output.getvalue())
+
+    def test_standalone_publish_output(self) -> None:
+        output = StringIO()
+        with (
+            patch(
+                "csdemo_mapextractor.r2.publish",
+                return_value={"manifest": "v1/2000908/index.json"},
+            ) as publish_release,
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                0,
+                main(
+                    [
+                        "publish",
+                        "--release-dir",
+                        "release",
+                        "--bucket",
+                        "maps",
+                        "--endpoint-url",
+                        "https://account.r2.cloudflarestorage.com",
+                    ]
+                ),
+            )
+
+        publish_release.assert_called_once_with(
+            Path("release"),
+            bucket="maps",
+            endpoint_url="https://account.r2.cloudflarestorage.com",
+            aws="aws",
+            profile=None,
+            force=False,
+        )
+        self.assertEqual(
+            '{\n  "manifest": "v1/2000908/index.json"\n}\n',
+            output.getvalue(),
+        )
 
 
 if __name__ == "__main__":

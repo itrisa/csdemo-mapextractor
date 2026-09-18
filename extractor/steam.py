@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import argparse
 import re
 import shutil
 import subprocess
 import time
+from typing import Sequence
 
 
 _BUILD_ID = re.compile(r'"buildid"\s*"(\d+)"')
@@ -72,3 +74,21 @@ def _find_named_block(output: str, name: str) -> str:
             if depth == 0:
                 return output[start + 1 : position]
     raise RuntimeError(f"SteamCMD block {name!r} is incomplete")
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--steamcmd")
+    parser.add_argument("--key", action="store_true")
+    arguments = parser.parse_args(argv)
+    build_id, updated_at = public_build(arguments.steamcmd)
+    print(
+        build_id
+        if arguments.key
+        else f'{{"buildid":"{build_id}","timeupdated":"{updated_at}"}}'
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

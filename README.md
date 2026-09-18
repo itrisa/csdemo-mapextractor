@@ -150,6 +150,12 @@ CS2 anonymously through SteamCMD, skips builds already present in the public
 root index, installs a checksum-pinned Linux Source2Viewer CLI, builds the
 release, and publishes it to R2.
 
+The workflow isolates untrusted tooling from storage credentials: SteamCMD and
+the extractor run in jobs without R2 secrets, while the gate and publication
+jobs use only Python's standard library and the runner-provided AWS CLI.
+Dependencies used to build assets are version- and hash-locked. The build job
+requires at least 75 GiB of free runner storage before downloading CS2.
+
 Configure these GitHub Actions secrets:
 
 - `R2_ACCESS_KEY_ID`

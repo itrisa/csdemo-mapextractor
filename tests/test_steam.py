@@ -1,8 +1,10 @@
 import subprocess
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest.mock import patch
 
-from csdemo_mapextractor.steam import public_build
+from csdemo_mapextractor.steam import main, public_build
 
 
 class SteamTests(unittest.TestCase):
@@ -37,6 +39,19 @@ class SteamTests(unittest.TestCase):
 
         self.assertIn("+app_info_update", run.call_args.args[0])
         self.assertTrue(run.call_args.kwargs["check"])
+
+    def test_standalone_key_output(self) -> None:
+        output = StringIO()
+        with (
+            patch(
+                "csdemo_mapextractor.steam.public_build",
+                return_value=("25218825", "1789000000"),
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(0, main(["--steamcmd", "steamcmd", "--key"]))
+
+        self.assertEqual("25218825\n", output.getvalue())
 
 
 if __name__ == "__main__":

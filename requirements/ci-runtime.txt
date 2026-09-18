@@ -1,0 +1,2 @@
+meshoptimizer==0.2.30a0 \
+    --hash=sha256:36b18b61a95ba992de804b1e91e86be2ba185925e4e2c1481495f8c68a17f5db

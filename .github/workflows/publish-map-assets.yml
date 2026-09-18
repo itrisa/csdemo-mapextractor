@@ -18,29 +18,38 @@ concurrency:
   group: publish-cs2-map-assets
   cancel-in-progress: false
 
-jobs:
-  publish:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
-    env:
-      R2_BUCKET: ${{ vars.R2_BUCKET }}
-      FORCE_REBUILD: ${{ inputs.force || false }}
+env:
+  R2_BUCKET: ${{ vars.R2_BUCKET }}
+  FORCE_REBUILD: ${{ inputs.force || false }}
 
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      build_id: ${{ steps.version.outputs.build_id }}
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.11"
-          cache: pip
-
       - name: Install SteamCMD
         uses: andriivitiv/setup-steamcmd@36b19fc86c5f39214c643bb631aeb86edf5ccafa # v1
 
-      - name: Install pipeline dependencies
-        run: python -m pip install -e ".[meshopt]" "awscli==1.46.1"
+      - name: Determine CS2 build
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_id="$(python extractor/steam.py --key)"
+          echo "build_id=${build_id}" >> "${GITHUB_OUTPUT}"
+
+  gate:
+    needs: version
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.gate.outputs.changed }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Validate R2 configuration
         shell: bash
@@ -55,7 +64,7 @@ jobs:
           : "${R2_ACCOUNT_ID:?Set the R2_ACCOUNT_ID repository secret}"
           : "${R2_BUCKET:?Set the R2_BUCKET repository variable}"
 
-      - name: Determine whether the CS2 build changed
+      - name: Check current release
         id: gate
         shell: bash
         env:
@@ -65,38 +74,67 @@ jobs:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          build_id="$(csdemo-mapextractor steam-build --key)"
-          echo "build_id=${build_id}" >> "${GITHUB_OUTPUT}"
-
           if [[ "${FORCE_REBUILD}" == "true" ]]; then
             echo "changed=true" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
-
           endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          published="$(csdemo-mapextractor r2-current-build \
+          published="$(python extractor/r2.py current-build \
             --bucket "${R2_BUCKET}" \
             --endpoint-url "${endpoint}")"
-
-          if [[ "${published}" == "${build_id}" ]]; then
+          if [[ "${published}" == "${{ needs.version.outputs.build_id }}" ]]; then
             echo "changed=false" >> "${GITHUB_OUTPUT}"
-            echo "Steam build ${build_id} is already published."
+            echo "Steam build ${published} is already published."
           else
             echo "changed=true" >> "${GITHUB_OUTPUT}"
           fi
 
+  build:
+    needs: [version, gate]
+    if: needs.gate.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install SteamCMD
+        uses: andriivitiv/setup-steamcmd@36b19fc86c5f39214c643bb631aeb86edf5ccafa # v1
+
+      - name: Require sufficient runner storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          available_kib="$(df -Pk --output=avail "${GITHUB_WORKSPACE}" | awk 'NR == 2 {print $1}')"
+          required_kib=$((75 * 1024 * 1024))
+          df -h "${GITHUB_WORKSPACE}"
+          if (( available_kib < required_kib )); then
+            echo "::error::At least 75 GiB free is required to install and process CS2."
+            exit 1
+          fi
+
+      - name: Install hash-locked build dependencies
+        run: |
+          python -m pip install --require-hashes -r requirements/ci-build.txt
+          python -m pip install --no-build-isolation --no-deps --require-hashes -r requirements/ci-runtime.txt
+          python -m pip install --no-build-isolation --no-deps -e .
+
       - name: Download CS2
-        if: steps.gate.outputs.changed == 'true'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "${GITHUB_WORKSPACE}/.work/game"
-          df -h
           for attempt in 1 2 3; do
             if steamcmd \
               +force_install_dir "${GITHUB_WORKSPACE}/.work/game" \
               +login anonymous \
-              +app_update 730 validate \
+              +app_update 730 \
               +quit \
               && test -f "${GITHUB_WORKSPACE}/.work/game/game/csgo/pak01_dir.vpk" \
               && test -f "${GITHUB_WORKSPACE}/.work/game/game/csgo/steam.inf" \
@@ -111,11 +149,9 @@ jobs:
           done
 
       - name: Install Source2Viewer CLI
-        if: steps.gate.outputs.changed == 'true'
         run: bash scripts/install_source2viewer.sh
 
       - name: Build versioned release
-        if: steps.gate.outputs.changed == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -123,10 +159,32 @@ jobs:
             --cs2-dir "${GITHUB_WORKSPACE}/.work/game" \
             --source2viewer "${GITHUB_WORKSPACE}/tools/Source2Viewer-CLI" \
             --output-dir "${GITHUB_WORKSPACE}/out/release" \
-            --steam-build-id "${{ steps.gate.outputs.build_id }}"
+            --steam-build-id "${{ needs.version.outputs.build_id }}"
+
+      - name: Upload release for publication
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cs2-map-release-${{ needs.version.outputs.build_id }}
+          path: out/release
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  publish:
+    needs: [version, gate, build]
+    if: needs.gate.outputs.changed == 'true' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Download validated release
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: cs2-map-release-${{ needs.version.outputs.build_id }}
+          path: out/release
 
       - name: Publish release to R2
-        if: steps.gate.outputs.changed == 'true'
         shell: bash
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -139,17 +197,11 @@ jobs:
           if [[ "${FORCE_REBUILD}" == "true" ]]; then
             args+=(--force)
           fi
-          csdemo-mapextractor publish-r2 \
+          python extractor/r2.py publish \
             --release-dir "${GITHUB_WORKSPACE}/out/release" \
             --bucket "${R2_BUCKET}" \
             --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
             "${args[@]}"
 
       - name: Summarize
-        shell: bash
-        run: |
-          if [[ "${{ steps.gate.outputs.changed }}" == "true" ]]; then
-            echo "Published CS2 Steam build ${{ steps.gate.outputs.build_id }}." >> "${GITHUB_STEP_SUMMARY}"
-          else
-            echo "CS2 Steam build ${{ steps.gate.outputs.build_id }} was already current." >> "${GITHUB_STEP_SUMMARY}"
-          fi
+        run: echo "Published CS2 Steam build ${{ needs.version.outputs.build_id }}." >> "${GITHUB_STEP_SUMMARY}"
