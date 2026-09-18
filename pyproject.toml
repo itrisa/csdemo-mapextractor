@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "csdemo-mapextractor"
+version = "0.1.0"
+description = "Extract collision geometry from local Counter-Strike 2 maps"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+meshopt = [
+	"meshoptimizer==0.2.30a0",
+	"numpy>=2.0",
+]
+
+[project.scripts]
+csdemo-mapextractor = "csdemo_mapextractor.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
