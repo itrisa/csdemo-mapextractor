@@ -111,9 +111,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          available_kib="$(df -Pk --output=avail "${GITHUB_WORKSPACE}" | awk 'NR == 2 {print $1}')"
+          available_kib="$(df -Pk "${GITHUB_WORKSPACE}" | awk 'NR == 2 {print $4}')"
           required_kib=$((75 * 1024 * 1024))
           df -h "${GITHUB_WORKSPACE}"
+          if [[ ! "${available_kib}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Unable to determine available runner storage."
+            exit 1
+          fi
           if (( available_kib < required_kib )); then
             echo "::error::At least 75 GiB free is required to install and process CS2."
             exit 1
