@@ -197,15 +197,11 @@ jobs:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          args=()
-          if [[ "${FORCE_REBUILD}" == "true" ]]; then
-            args+=(--force)
-          fi
           python extractor/r2.py publish \
             --release-dir "${GITHUB_WORKSPACE}/out/release" \
             --bucket "${R2_BUCKET}" \
             --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
-            "${args[@]}"
+            --keep 2
 
       - name: Summarize
         run: echo "Published CS2 Steam build ${{ needs.version.outputs.build_id }}." >> "${GITHUB_STEP_SUMMARY}"

@@ -99,7 +99,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     publish_parser.add_argument("--endpoint-url", required=True)
     publish_parser.add_argument("--aws", default="aws")
     publish_parser.add_argument("--profile")
-    publish_parser.add_argument("--force", action="store_true")
+    publish_parser.add_argument("--keep", type=int, default=r2.DEFAULT_KEEP)
 
     current_parser = subparsers.add_parser("r2-current-build")
     current_parser.add_argument("--bucket", required=True)
@@ -139,7 +139,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             endpoint_url=arguments.endpoint_url,
             aws=arguments.aws,
             profile=arguments.profile,
-            force=arguments.force,
+            keep=arguments.keep,
         )
         print(json.dumps(result, indent=2))
         return 0
@@ -388,7 +388,7 @@ def _build_release(arguments: argparse.Namespace) -> int:
         force=arguments.force,
     )
     print(json.dumps({
-        "directory": str(result.version_directory),
+        "manifest_path": str(result.manifest_path),
         **result.root_index,
     }, indent=2))
     return 0

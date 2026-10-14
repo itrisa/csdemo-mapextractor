@@ -7,7 +7,6 @@ import hashlib
 import json
 from pathlib import Path
 import re
-import shutil
 import tempfile
 from typing import Iterable
 
@@ -16,15 +15,17 @@ from .layered import CollisionLayer, dumps as dumps_layered, entity_layers, from
 from . import source2viewer
 
 
+_MAP_PREFIX = "de_"
 _EXCLUDED_MAP_MARKERS = ("_preview", "_vanity", "lobby_", "graphics_")
 _SAFE_VERSION = re.compile(r"[A-Za-z0-9._-]+")
+OBJECTS_DIRECTORY = "objects"
 
 
 @dataclass(frozen=True, slots=True)
 class ReleaseResult:
     root_index: dict[str, object]
     version_manifest: dict[str, object]
-    version_directory: Path
+    manifest_path: Path
 
 
 def discover_maps(cs2_dir: Path) -> tuple[str, ...]:
@@ -35,7 +36,8 @@ def discover_maps(cs2_dir: Path) -> tuple[str, ...]:
         sorted(
             path.stem
             for path in maps_dir.glob("*.vpk")
-            if not any(marker in path.stem.lower() for marker in _EXCLUDED_MAP_MARKERS)
+            if path.stem.lower().startswith(_MAP_PREFIX)
+            and not any(marker in path.stem.lower() for marker in _EXCLUDED_MAP_MARKERS)
         )
     )
 
@@ -82,17 +84,17 @@ def build_release(
     )
     if _SAFE_VERSION.fullmatch(release_key) is None:
         raise ValueError(f"invalid release key: {release_key!r}")
-    version_relative = Path("v1") / release_key
-    version_directory = output_dir / version_relative
-    if version_directory.exists() and not force:
+    release_directory = output_dir / "v1"
+    existing = sorted(release_directory.glob(f"release-{release_key}-*.json"))
+    if existing and not force:
         raise FileExistsError(
-            f"release {version_directory} already exists; pass --force to replace it"
+            f"release {existing[0]} already exists; pass --force to replace it"
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".csdemo-release-", dir=output_dir) as temporary:
-        staged_version = Path(temporary) / client_version
-        staged_version.mkdir()
+        staged_objects = Path(temporary) / OBJECTS_DIRECTORY
+        staged_objects.mkdir()
         available_resources = source2viewer.list_map_asset_resources(
             executable, cs2_dir
         )
@@ -100,7 +102,7 @@ def build_release(
             _build_map(
                 cs2_dir,
                 executable,
-                staged_version,
+                staged_objects,
                 map_name,
                 available_resources=available_resources,
                 all_layers=all_layers,
@@ -114,6 +116,7 @@ def build_release(
         )
         version_manifest: dict[str, object] = {
             "format": "csdemo-map-release-v1",
+            "release": release_key,
             "compression": "EXT_meshopt_compression",
             "coordinate_system": "source2-hammer-z-up",
             "selection_profile": selection_profile,
@@ -122,28 +125,35 @@ def build_release(
             **versions,
             "maps": map_records,
         }
-        _write_json(staged_version / "index.json", version_manifest)
+        manifest_bytes = _json_bytes(version_manifest)
+        manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()[:12]
 
-        version_directory.parent.mkdir(parents=True, exist_ok=True)
-        if version_directory.exists():
-            shutil.rmtree(version_directory)
-        staged_version.replace(version_directory)
+        objects_directory = release_directory / OBJECTS_DIRECTORY
+        objects_directory.mkdir(parents=True, exist_ok=True)
+        for staged in staged_objects.iterdir():
+            target = objects_directory / staged.name
+            if not target.exists():
+                staged.replace(target)
+        for previous in existing:
+            previous.unlink()
+        manifest_path = release_directory / f"release-{release_key}-{manifest_digest}.json"
+        manifest_path.write_bytes(manifest_bytes)
 
     root_index: dict[str, object] = {
         "format": "csdemo-map-host-v1",
         "current": release_key,
         "client_version": client_version,
         "steam_build_id": steam_build_id,
-        "manifest": (version_relative / "index.json").as_posix(),
+        "manifest": manifest_path.relative_to(output_dir).as_posix(),
     }
     _write_json_atomic(output_dir / "index.json", root_index)
-    return ReleaseResult(root_index, version_manifest, version_directory)
+    return ReleaseResult(root_index, version_manifest, manifest_path)
 
 
 def _build_map(
     cs2_dir: Path,
     executable: Path,
-    version_directory: Path,
+    objects_directory: Path,
     map_name: str,
     *,
     available_resources: frozenset[str],
@@ -181,34 +191,32 @@ def _build_map(
     )
     _validate_assets(map_name, assets)
 
-    map_directory = version_directory / "maps" / map_name
     files: dict[str, dict[str, object]] = {}
-    files["collision"] = _write_file(
-        version_directory, map_directory / "collision.glb", collision, "model/gltf-binary"
+    files["collision"] = _write_object(
+        objects_directory, ".glb", collision, "model/gltf-binary"
     )
     if assets.overview is not None:
-        files["overview"] = _write_file(
-            version_directory,
-            map_directory / "overview.txt",
+        files["overview"] = _write_object(
+            objects_directory,
+            ".txt",
             assets.overview,
             "text/plain; charset=utf-8",
         )
     if assets.logo is not None:
-        files["logo"] = _write_file(
-            version_directory,
-            map_directory / "logo.svg",
+        files["logo"] = _write_object(
+            objects_directory,
+            ".svg",
             assets.logo,
             "image/svg+xml",
         )
     radars = []
     for section, data in assets.radars.items():
-        filename = "radar.png" if section == "default" else f"radar_{section}.png"
         radars.append(
             {
                 "section": section,
-                **_write_file(
-                    version_directory,
-                    map_directory / filename,
+                **_write_object(
+                    objects_directory,
+                    ".png",
                     data,
                     "image/png",
                 ),
@@ -255,24 +263,31 @@ def _validate_assets(map_name: str, assets: source2viewer.MapAssets) -> None:
             raise ValueError(f"{map_name} radar section {section!r} is not PNG")
 
 
-def _write_file(
-    version_directory: Path,
-    path: Path,
+def _write_object(
+    objects_directory: Path,
+    suffix: str,
     data: bytes,
     content_type: str,
 ) -> dict[str, object]:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)
+    digest = hashlib.sha256(data).hexdigest()
+    name = f"{digest}{suffix}"
+    path = objects_directory / name
+    if not path.exists():
+        path.write_bytes(data)
     return {
-        "path": path.relative_to(version_directory).as_posix(),
+        "path": f"{OBJECTS_DIRECTORY}/{name}",
         "content_type": content_type,
         "bytes": len(data),
-        "sha256": hashlib.sha256(data).hexdigest(),
+        "sha256": digest,
     }
 
 
+def _json_bytes(value: dict[str, object]) -> bytes:
+    return (json.dumps(value, indent=2) + "\n").encode("utf-8")
+
+
 def _write_json(path: Path, value: dict[str, object]) -> None:
-    path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    path.write_bytes(_json_bytes(value))
 
 
 def _write_json_atomic(path: Path, value: dict[str, object]) -> None:

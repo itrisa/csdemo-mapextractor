@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -19,6 +20,8 @@ class ReleaseTests(unittest.TestCase):
             for name in (
                 "de_mirage.vpk",
                 "de_ancient.vpk",
+                "cs_office.vpk",
+                "ar_baggage.vpk",
                 "de_mirage_preview.vpk",
                 "lobby_mapveto.vpk",
                 "graphics_settings.vpk",
@@ -97,15 +100,37 @@ class ReleaseTests(unittest.TestCase):
                     steam_build_id="25218825",
                 )
 
-            version_dir = output / "v1" / "2000908-25218825"
-            self.assertEqual(version_dir, result.version_directory)
-            self.assertEqual(b"collision", (version_dir / "maps" / "de_mirage" / "collision.glb").read_bytes())
             root_index = json.loads((output / "index.json").read_text(encoding="utf-8"))
             self.assertEqual("25218825", root_index["steam_build_id"])
             self.assertEqual("2000908-25218825", root_index["current"])
-            manifest = json.loads((version_dir / "index.json").read_text(encoding="utf-8"))
-            self.assertEqual("maps/de_mirage/logo.svg", manifest["maps"][0]["files"]["logo"]["path"])
+            manifest_path = output / root_index["manifest"]
+            self.assertEqual(manifest_path, result.manifest_path)
+            self.assertRegex(
+                root_index["manifest"],
+                r"^v1/release-2000908-25218825-[0-9a-f]{12}\.json$",
+            )
+            manifest_bytes = manifest_path.read_bytes()
+            self.assertTrue(
+                manifest_path.name.endswith(
+                    hashlib.sha256(manifest_bytes).hexdigest()[:12] + ".json"
+                )
+            )
+            manifest = json.loads(manifest_bytes)
+            files = manifest["maps"][0]["files"]
+            collision_digest = hashlib.sha256(b"collision").hexdigest()
+            self.assertEqual(f"objects/{collision_digest}.glb", files["collision"]["path"])
+            self.assertEqual(
+                b"collision",
+                (manifest_path.parent / files["collision"]["path"]).read_bytes(),
+            )
+            self.assertEqual(
+                f"objects/{hashlib.sha256(b'<svg/>').hexdigest()}.svg",
+                files["logo"]["path"],
+            )
             self.assertEqual("default", manifest["maps"][0]["radars"][0]["section"])
+            self.assertEqual(
+                4, len(list((output / "v1" / "objects").iterdir()))
+            )
 
     def test_failed_build_does_not_replace_current_index(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -135,7 +160,8 @@ class ReleaseTests(unittest.TestCase):
                     )
 
             self.assertEqual('{"current":"previous"}\n', current.read_text(encoding="utf-8"))
-            self.assertFalse((output / "v1" / "2000908-25218825").exists())
+            self.assertEqual([], list(output.glob("v1/release-*.json")))
+            self.assertFalse((output / "v1" / "objects").exists())
 
 
 if __name__ == "__main__":
