@@ -1,0 +1,3 @@
+﻿# Colour bundle dependencies (build-release --color-bundles). Compile with:
+#   uv pip compile requirements/ci-bundle.in --constraint requirements/ci-build.txt --generate-hashes --python-version 3.11 --python-platform x86_64-manylinux_2_35 -o requirements/ci-bundle.txt
+pillow==12.3.0

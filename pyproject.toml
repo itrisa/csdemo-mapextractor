@@ -15,12 +15,21 @@ meshopt = [
 	"meshoptimizer==0.2.30a0",
 	"numpy>=2.0",
 ]
+color = [
+	"meshoptimizer==0.2.30a0",
+	"numpy>=2.0",
+	"open3d>=0.19",
+	"pillow>=10",
+	"scipy>=1.13",
+	"shapely>=2.0",
+	"triangle>=20250106",
+]
 
 [project.scripts]
 csdemo-mapextractor = "csdemo_mapextractor.cli:main"
 
 [tool.setuptools]
-packages = ["csdemo_mapextractor"]
+packages = ["csdemo_mapextractor", "csdemo_mapextractor.color"]
 package-dir = { csdemo_mapextractor = "extractor" }
 
 [tool.pytest.ini_options]

@@ -7,6 +7,8 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import shutil
+import sys
 import tempfile
 from typing import Iterable
 
@@ -18,6 +20,8 @@ from . import source2viewer
 _MAP_PREFIX = "de_"
 _EXCLUDED_MAP_MARKERS = ("_preview", "_vanity", "lobby_", "graphics_")
 _SAFE_VERSION = re.compile(r"[A-Za-z0-9._-]+")
+# published with their collision GLB only: colouring them takes too long / too much memory for CI runners
+COLOR_EXCLUDED_MAPS = frozenset({"de_boulder"})
 OBJECTS_DIRECTORY = "objects"
 
 
@@ -70,6 +74,7 @@ def build_release(
     steam_build_id: str | None = None,
     all_layers: bool = False,
     force: bool = False,
+    color_bundles: Path | None = None,
 ) -> ReleaseResult:
     versions = steam_versions(cs2_dir)
     client_version = versions["client_version"]
@@ -106,6 +111,7 @@ def build_release(
                 map_name,
                 available_resources=available_resources,
                 all_layers=all_layers,
+                color_bundles=color_bundles,
             )
             for map_name in map_names
         ]
@@ -125,29 +131,49 @@ def build_release(
             **versions,
             "maps": map_records,
         }
-        manifest_bytes = _json_bytes(version_manifest)
-        manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()[:12]
-
         objects_directory = release_directory / OBJECTS_DIRECTORY
         objects_directory.mkdir(parents=True, exist_ok=True)
         for staged in staged_objects.iterdir():
             target = objects_directory / staged.name
             if not target.exists():
                 staged.replace(target)
-        for previous in existing:
+        return write_manifest(output_dir, version_manifest)
+
+
+def load_release(output_dir: Path) -> tuple[dict[str, object], Path, dict[str, object]]:
+    """Returns (root index, manifest path, manifest) of a built release directory."""
+    root_index = json.loads((output_dir / "index.json").read_text(encoding="utf-8"))
+    manifest_path = output_dir / Path(str(root_index["manifest"]))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    return root_index, manifest_path, manifest
+
+
+def write_manifest(output_dir: Path, version_manifest: dict[str, object]) -> ReleaseResult:
+    """Write the manifest under its content-derived name and point the root index at it."""
+    release_key = str(version_manifest["release"])
+    release_directory = output_dir / "v1"
+    manifest_bytes = _json_bytes(version_manifest)
+    manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()[:12]
+    manifest_path = release_directory / f"release-{release_key}-{manifest_digest}.json"
+    for previous in release_directory.glob(f"release-{release_key}-*.json"):
+        if previous != manifest_path:
             previous.unlink()
-        manifest_path = release_directory / f"release-{release_key}-{manifest_digest}.json"
-        manifest_path.write_bytes(manifest_bytes)
+    manifest_path.write_bytes(manifest_bytes)
 
     root_index: dict[str, object] = {
         "format": "csdemo-map-host-v1",
         "current": release_key,
-        "client_version": client_version,
-        "steam_build_id": steam_build_id,
+        "client_version": version_manifest.get("client_version"),
+        "steam_build_id": version_manifest.get("steam_build_id"),
         "manifest": manifest_path.relative_to(output_dir).as_posix(),
     }
     _write_json_atomic(output_dir / "index.json", root_index)
     return ReleaseResult(root_index, version_manifest, manifest_path)
+
+
+def write_object(objects_directory: Path, suffix: str, data: bytes, content_type: str) -> dict[str, object]:
+    objects_directory.mkdir(parents=True, exist_ok=True)
+    return _write_object(objects_directory, suffix, data, content_type)
 
 
 def _build_map(
@@ -158,6 +184,7 @@ def _build_map(
     *,
     available_resources: frozenset[str],
     all_layers: bool,
+    color_bundles: Path | None = None,
 ) -> dict[str, object]:
     source_glb = source2viewer.extract_world_physics(
         executable, cs2_dir, map_name, materials=False
@@ -222,7 +249,7 @@ def _build_map(
                 ),
             }
         )
-    return {
+    record: dict[str, object] = {
         "name": map_name,
         "files": files,
         "radars": radars,
@@ -231,6 +258,32 @@ def _build_map(
         "triangle_count": sum(len(layer.geometry.triangles) for layer in selected_layers),
         "layers": [_layer_record(layer) for layer in selected_layers],
     }
+    if color_bundles is not None and map_name not in COLOR_EXCLUDED_MAPS:
+        from .color import bundle as _  # noqa: F401 - missing dependencies must fail the build, not skip colour
+
+        try:
+            record["color_source_sha256"] = _write_color_bundle(
+                cs2_dir, executable, color_bundles, map_name, collision
+            )
+        except Exception as error:  # noqa: BLE001 - colouring is optional; the map still ships uncoloured
+            shutil.rmtree(color_bundles / map_name, ignore_errors=True)
+            print(f"warning: no colour bundle for {map_name}: {error}", file=sys.stderr)
+    return record
+
+
+def _write_color_bundle(
+    cs2_dir: Path, executable: Path, color_bundles: Path, map_name: str, collision: bytes
+) -> str:
+    from .color import bundle
+
+    bundle_dir = color_bundles / map_name
+    if bundle_dir.exists():
+        shutil.rmtree(bundle_dir)
+    with tempfile.TemporaryDirectory(prefix=f".render-{map_name}-") as temporary:
+        render_dir = source2viewer.export_render_world(
+            executable, cs2_dir, map_name, Path(temporary)
+        )
+        return bundle.create(bundle_dir, map_name, collision, render_dir)
 
 
 def _select_layers(

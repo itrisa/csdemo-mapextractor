@@ -8,6 +8,11 @@ on:
         required: false
         type: boolean
         default: false
+      recolor:
+        description: Recolour every map instead of reusing unchanged published coloured maps
+        required: false
+        type: boolean
+        default: false
   schedule:
     - cron: "0 2 * * *"
 
@@ -21,6 +26,7 @@ concurrency:
 env:
   R2_BUCKET: ${{ vars.R2_BUCKET }}
   FORCE_REBUILD: ${{ inputs.force || false }}
+  PUBLISHED_INDEX: ${{ !inputs.recolor && format('{0}/index.json', vars.MAPS_PUBLIC_URL || 'https://maps.csdemo.tv') || '' }}
 
 jobs:
   version:
@@ -94,6 +100,8 @@ jobs:
     if: needs.gate.outputs.changed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 330
+    outputs:
+      color_maps: ${{ steps.color_plan.outputs.maps }}
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -127,6 +135,7 @@ jobs:
         run: |
           python -m pip install --require-hashes -r requirements/ci-build.txt
           python -m pip install --no-build-isolation --no-deps --require-hashes -r requirements/ci-runtime.txt
+          python -m pip install --require-hashes -r requirements/ci-bundle.txt
           python -m pip install --no-build-isolation --no-deps -e .
 
       - name: Download CS2
@@ -163,7 +172,28 @@ jobs:
             --cs2-dir "${GITHUB_WORKSPACE}/.work/game" \
             --source2viewer "${GITHUB_WORKSPACE}/tools/Source2Viewer-CLI" \
             --output-dir "${GITHUB_WORKSPACE}/out/release" \
-            --steam-build-id "${{ needs.version.outputs.build_id }}"
+            --steam-build-id "${{ needs.version.outputs.build_id }}" \
+            --color-bundles "${GITHUB_WORKSPACE}/out/color-bundles"
+
+      - name: Plan map colouring
+        id: color_plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          maps="$(csdemo-mapextractor color-plan \
+            --release-dir "${GITHUB_WORKSPACE}/out/release" \
+            --published-index "${PUBLISHED_INDEX}")"
+          echo "Maps to colour: ${maps}"
+          echo "maps=${maps}" >> "${GITHUB_OUTPUT}"
+          # only bundles that are coloured in this run are handed on
+          for bundle in "${GITHUB_WORKSPACE}"/out/color-bundles/*/; do
+            name="$(basename "${bundle}")"
+            if ! jq -e --arg name "${name}" 'index($name) != null' <<< "${maps}" > /dev/null; then
+              rm -rf "${bundle}"
+            fi
+          done
+          du -sh "${GITHUB_WORKSPACE}/out/color-bundles" || true
+          df -h "${GITHUB_WORKSPACE}"
 
       - name: Upload release for publication
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -174,9 +204,84 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+      - name: Install hash-locked artifact client
+        if: steps.color_plan.outputs.maps != '[]'
+        run: npm ci --ignore-scripts --no-audit --no-fund --prefix scripts/ci-artifacts
+
+      - name: Upload colour bundles
+        if: steps.color_plan.outputs.maps != '[]'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          COLOR_MAPS: ${{ steps.color_plan.outputs.maps }}
+          ARTIFACT_PREFIX: color-bundle-${{ needs.version.outputs.build_id }}-
+        with:
+          script: |
+            const { pathToFileURL } = require("node:url");
+            const path = require("node:path");
+            const script = path.join(process.env.GITHUB_WORKSPACE, "scripts/ci-artifacts/upload-bundles.mjs");
+            const { default: uploadBundles } = await import(pathToFileURL(script).href);
+            await uploadBundles({
+              core,
+              root: path.join(process.env.GITHUB_WORKSPACE, "out/color-bundles"),
+              maps: JSON.parse(process.env.COLOR_MAPS),
+              prefix: process.env.ARTIFACT_PREFIX,
+            });
+
+  colorize:
+    needs: [version, build]
+    if: needs.build.result == 'success' && needs.build.outputs.color_maps != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        map: ${{ fromJSON(needs.build.outputs.color_maps) }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install hash-locked colouring dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq --no-install-recommends libgl1 libgomp1
+          python -m pip install --require-hashes -r requirements/ci-build.txt
+          python -m pip install --no-build-isolation --no-deps --require-hashes -r requirements/ci-runtime.txt
+          python -m pip install --require-hashes -r requirements/ci-color.txt
+          python -m pip install --no-build-isolation --no-deps -e .
+
+      - name: Download colour bundle
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: color-bundle-${{ needs.version.outputs.build_id }}-${{ matrix.map }}
+          path: out/color-bundles
+
+      - name: Colour ${{ matrix.map }}
+        run: |
+          csdemo-mapextractor colorize \
+            --bundle "out/color-bundles/${{ matrix.map }}" \
+            --output "out/colored/${{ matrix.map }}.glb"
+
+      - name: Upload coloured map
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: colored-${{ needs.version.outputs.build_id }}-${{ matrix.map }}
+          path: out/colored
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
   publish:
-    needs: [version, gate, build]
-    if: needs.gate.outputs.changed == 'true' && needs.build.result == 'success'
+    needs: [version, gate, build, colorize]
+    # a map whose colouring failed is published without a coloured GLB; the client falls back to collision
+    if: >-
+      always() && needs.gate.outputs.changed == 'true' && needs.build.result == 'success'
+      && needs.colorize.result != 'cancelled'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -187,6 +292,33 @@ jobs:
         with:
           name: cs2-map-release-${{ needs.version.outputs.build_id }}
           path: out/release
+
+      - name: Download coloured maps
+        if: needs.colorize.result != 'skipped'
+        continue-on-error: true
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: colored-${{ needs.version.outputs.build_id }}-*
+          path: out/colored
+          merge-multiple: true
+
+      - name: Attach coloured maps
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/colored
+          python -m extractor.cli attach-colored \
+            --release-dir "${GITHUB_WORKSPACE}/out/release" \
+            --colored-dir "${GITHUB_WORKSPACE}/out/colored" \
+            --published-index "${PUBLISHED_INDEX}" | tee out/attach.json
+          missing="$(jq -r '.colored | to_entries[] | select(.value == "missing" or .value == "no-bundle") | .key' out/attach.json)"
+          if [[ -n "${missing}" ]]; then
+            echo "::warning::Published without coloured GLB: ${missing//$'\n'/, }"
+          fi
+          {
+            echo "### Coloured maps"
+            jq -r '.colored | to_entries[] | "- \(.key): \(.value)"' out/attach.json
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Publish release to R2
         shell: bash

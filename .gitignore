@@ -11,3 +11,4 @@ out/
 *.glb
 *.tri
 *.manifest.json
+node_modules/

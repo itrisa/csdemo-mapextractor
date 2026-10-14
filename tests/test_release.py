@@ -1,4 +1,7 @@
+from contextlib import ExitStack
 import hashlib
+import importlib.util
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -162,6 +165,67 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual('{"current":"previous"}\n', current.read_text(encoding="utf-8"))
             self.assertEqual([], list(output.glob("v1/release-*.json")))
             self.assertFalse((output / "v1" / "objects").exists())
+
+    @unittest.skipUnless(
+        all(importlib.util.find_spec(name) for name in ("numpy", "PIL")),
+        "numpy and Pillow are required for colour bundles",
+    )
+    def test_colour_bundle_failure_ships_map_uncoloured(self) -> None:
+        geometry = CollisionGeometry(
+            ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+            ((0, 1, 2),),
+        )
+        layer = CollisionLayer("default", (), geometry)
+
+        called = []
+
+        def write_bundle(cs2_dir, executable, color_bundles, map_name, collision):
+            called.append(map_name)
+            if map_name == "de_train":
+                (color_bundles / map_name).mkdir(parents=True)
+                raise RuntimeError("render world too large")
+            return "digest-" + map_name
+
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            root = Path(directory)
+            cs2_dir = root / "cs2"
+            steam_inf = cs2_dir / "game" / "csgo" / "steam.inf"
+            steam_inf.parent.mkdir(parents=True)
+            steam_inf.write_text("ClientVersion=2000908\n", encoding="utf-8")
+            bundles = root / "bundles"
+            patches = {
+                "source2viewer.extract_world_physics": b"world",
+                "source2viewer.extract_entity_physics": b"entities",
+                "source2viewer.extract_entity_data": "m_entityKeyValues = []",
+                "source2viewer.extract_map_assets": MapAssets(overview=b"{}", logo=None, radars={}),
+                "source2viewer.version": "20.0",
+                "source2viewer.list_map_asset_resources": frozenset(),
+                "from_vrf": (layer,),
+                "entity_layers": (),
+                "dumps_layered": b"collision",
+            }
+            for target, value in patches.items():
+                stack.enter_context(patch(f"csdemo_mapextractor.release.{target}", return_value=value))
+            stack.enter_context(
+                patch("csdemo_mapextractor.release._write_color_bundle", side_effect=write_bundle)
+            )
+            stack.enter_context(patch("sys.stderr", new_callable=io.StringIO))
+
+            result = build_release(
+                cs2_dir,
+                Path("tool"),
+                root / "release",
+                maps=("de_boulder", "de_mirage", "de_train"),
+                color_bundles=bundles,
+            )
+
+            records = {record["name"]: record for record in result.version_manifest["maps"]}
+            self.assertNotIn("color_source_sha256", records["de_train"])
+            self.assertEqual("digest-de_mirage", records["de_mirage"]["color_source_sha256"])
+            self.assertFalse((bundles / "de_train").exists())
+            # excluded maps are published but never bundled
+            self.assertNotIn("de_boulder", called)
+            self.assertNotIn("color_source_sha256", records["de_boulder"])
 
 
 if __name__ == "__main__":

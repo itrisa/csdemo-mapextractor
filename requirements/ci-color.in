@@ -1,0 +1,8 @@
+﻿# Colouring dependencies (colorize command). Compile with:
+#   uv pip compile requirements/ci-color.in --constraint requirements/ci-build.txt --generate-hashes --python-version 3.11 --python-platform x86_64-manylinux_2_35 -o requirements/ci-color.txt
+numpy==2.2.6
+open3d==0.20.0
+pillow==12.3.0
+scipy==1.17.1
+shapely==2.2.0
+triangle==20250106

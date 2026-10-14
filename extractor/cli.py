@@ -92,6 +92,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     release_parser.add_argument("--steam-build-id")
     release_parser.add_argument("--all-layers", action="store_true")
     release_parser.add_argument("--force", action="store_true")
+    release_parser.add_argument(
+        "--color-bundles",
+        type=Path,
+        help="also write per-map colouring input bundles to this directory",
+    )
+
+    plan_parser = subparsers.add_parser(
+        "color-plan", help="print the maps whose coloured GLB must be (re)built, as JSON"
+    )
+    plan_parser.add_argument("--release-dir", type=Path, default=Path("out") / "release")
+    plan_parser.add_argument("--published-index", help="URL of the published root index.json")
+
+    colorize_parser = subparsers.add_parser(
+        "colorize", help="build the vertex-coloured GLB of one colour bundle"
+    )
+    colorize_parser.add_argument("--bundle", type=Path, required=True)
+    colorize_parser.add_argument("--output", type=Path, required=True)
+    colorize_parser.add_argument("--workers", type=int)
+
+    attach_parser = subparsers.add_parser(
+        "attach-colored", help="add built or reused coloured GLBs to a release"
+    )
+    attach_parser.add_argument("--release-dir", type=Path, default=Path("out") / "release")
+    attach_parser.add_argument("--colored-dir", type=Path)
+    attach_parser.add_argument("--published-index", help="URL of the published root index.json")
 
     publish_parser = subparsers.add_parser("publish-r2")
     publish_parser.add_argument("--release-dir", type=Path, default=Path("out") / "release")
@@ -132,6 +157,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if arguments.command == "build-release":
         return _build_release(arguments)
+    if arguments.command == "color-plan":
+        from . import colored
+
+        print(json.dumps(colored.plan(arguments.release_dir, arguments.published_index)))
+        return 0
+    if arguments.command == "colorize":
+        return _colorize(arguments)
+    if arguments.command == "attach-colored":
+        from . import colored
+
+        result, outcome = colored.attach(
+            arguments.release_dir, arguments.colored_dir, arguments.published_index
+        )
+        print(json.dumps({"manifest_path": str(result.manifest_path), "colored": outcome}, indent=2))
+        return 0
     if arguments.command == "publish-r2":
         result = r2.publish(
             arguments.release_dir,
@@ -386,11 +426,27 @@ def _build_release(arguments: argparse.Namespace) -> int:
         steam_build_id=arguments.steam_build_id,
         all_layers=arguments.all_layers,
         force=arguments.force,
+        color_bundles=arguments.color_bundles,
     )
     print(json.dumps({
         "manifest_path": str(result.manifest_path),
         **result.root_index,
     }, indent=2))
+    return 0
+
+
+def _colorize(arguments: argparse.Namespace) -> int:
+    from .color import bundle, pipeline
+
+    source = bundle.digest(arguments.bundle)
+    data = pipeline.colorize(
+        arguments.bundle, workers=arguments.workers, log=lambda *a: print(*a, flush=True)
+    )
+    arguments.output.parent.mkdir(parents=True, exist_ok=True)
+    arguments.output.write_bytes(data)
+    arguments.output.with_suffix(".json").write_text(
+        json.dumps({"source_sha256": source}) + "\n", encoding="utf-8"
+    )
     return 0
 
 

@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from csdemo_mapextractor.source2viewer import (
+    export_render_world,
     extract_entity_data,
     extract_entity_physics,
     extract_map_assets,
@@ -57,6 +58,43 @@ class Source2ViewerTests(unittest.TestCase):
     def test_rejects_unsafe_map_name(self) -> None:
         with self.assertRaisesRegex(ValueError, "map name"):
             extract_world_physics(Path("tool"), Path("cs2"), "../pak01")
+
+    def test_exports_render_world_as_gltf_into_existing_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cs2_dir = Path(directory) / "cs2"
+            map_vpk = cs2_dir / "game" / "csgo" / "maps" / "de_mirage.vpk"
+            map_vpk.parent.mkdir(parents=True)
+            map_vpk.write_bytes(b"vpk")
+            output = Path(directory) / "render"
+
+            def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+                target = Path(command[command.index("-o") + 1])
+                self.assertTrue(target.is_dir())
+                self.assertEqual(target, kwargs["cwd"])
+                world = target / "maps" / "de_mirage"
+                world.mkdir(parents=True)
+                (world / "world.gltf").write_text("{}", encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, stderr="")
+
+            with patch("csdemo_mapextractor.source2viewer.subprocess.run", side_effect=fake_run) as run:
+                result = export_render_world(Path("tool"), cs2_dir, "de_mirage", output)
+
+            self.assertEqual(output.resolve() / "maps" / "de_mirage", result)
+            command = run.call_args.args[0]
+            self.assertEqual("maps/de_mirage/world.vwrld_c", command[command.index("-f") + 1])
+            self.assertEqual("gltf", command[command.index("--gltf_export_format") + 1])
+            self.assertIn("--gltf_export_materials", command)
+
+    def test_render_world_export_without_output_raises_with_log_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cs2_dir = Path(directory)
+            map_vpk = cs2_dir / "game" / "csgo" / "maps" / "de_boulder.vpk"
+            map_vpk.parent.mkdir(parents=True)
+            map_vpk.write_bytes(b"vpk")
+            failed = subprocess.CompletedProcess([], 0, stderr="NotSupportedException: too big\n")
+            with patch("csdemo_mapextractor.source2viewer.subprocess.run", return_value=failed):
+                with self.assertRaisesRegex(RuntimeError, "too big"):
+                    export_render_world(Path("tool"), cs2_dir, "de_boulder", Path(directory) / "out")
 
     def test_extracts_default_entity_physics_companion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -1,0 +1,8 @@
+﻿{
+  "name": "csdemo-mapextractor-ci-artifacts",
+  "private": true,
+  "description": "Uploads one GitHub Actions artifact per colour bundle (used by publish-map-assets.yml).",
+  "dependencies": {
+    "@actions/artifact": "6.3.1"
+  }
+}

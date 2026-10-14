@@ -332,6 +332,52 @@ def _extract_glb(
         )
 
 
+def export_render_world(
+    executable: Path, cs2_dir: Path, map_name: str, output_dir: Path
+) -> Path:
+    """Export the textured render world (world.gltf, its .bin buffers and PNG textures) into output_dir.
+
+    glTF rather than GLB because Source2Viewer cannot write GLBs of 2 GiB or more (de_boulder).
+    Returns the directory holding world.gltf; textures are written next to it.
+    """
+    _validate_map_name(map_name)
+    map_vpk = (cs2_dir / "game" / "csgo" / "maps" / f"{map_name}.vpk").resolve()
+    if not map_vpk.is_file():
+        raise FileNotFoundError(f"map VPK was not found: {map_vpk}")
+    if Path(executable).is_file():
+        executable = Path(executable).resolve()
+    output_dir = Path(output_dir).resolve()
+    # Source2Viewer treats a missing output path as a file name
+    output_dir.mkdir(parents=True, exist_ok=True)
+    completed = subprocess.run(
+        [
+            str(executable),
+            "-i",
+            str(map_vpk),
+            "-f",
+            f"maps/{map_name}/world.vwrld_c",
+            "-o",
+            str(output_dir),
+            "-d",
+            "--gltf_export_format",
+            "gltf",
+            "--gltf_export_materials",
+        ],
+        timeout=3600,
+        cwd=output_dir,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+    )
+    world = output_dir / "maps" / map_name / "world.gltf"
+    # Source2Viewer exits 0 even when an export throws, so the output file is the success signal
+    if completed.returncode != 0 or not world.is_file():
+        tail = "\n".join(completed.stderr.splitlines()[-20:])
+        raise RuntimeError(f"Source2Viewer did not export a render world for {map_name}:\n{tail}")
+    return world.parent
+
+
 def cs2_client_version(cs2_dir: Path) -> str | None:
     steam_inf = cs2_dir / "game" / "csgo" / "steam.inf"
     if not steam_inf.is_file():
