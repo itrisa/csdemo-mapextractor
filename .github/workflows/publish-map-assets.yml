@@ -249,11 +249,14 @@ jobs:
       - name: Install hash-locked colouring dependencies
         run: |
           sudo apt-get update -q
-          sudo apt-get install -yq --no-install-recommends libgl1 libgomp1
+          # system libraries libOpen3D links against (DT_NEEDED of the open3d 0.20 manylinux wheel)
+          sudo apt-get install -yq --no-install-recommends \
+            libegl1 libgl1 libgomp1 libidn2-0 libudev1 libusb-1.0-0 libx11-6
           python -m pip install --require-hashes -r requirements/ci-build.txt
           python -m pip install --no-build-isolation --no-deps --require-hashes -r requirements/ci-runtime.txt
           python -m pip install --require-hashes -r requirements/ci-color.txt
           python -m pip install --no-build-isolation --no-deps -e .
+          python -c "import open3d, meshoptimizer, extractor.color.shade, extractor.color.remesh, extractor.color.compact"
 
       - name: Download colour bundle
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
