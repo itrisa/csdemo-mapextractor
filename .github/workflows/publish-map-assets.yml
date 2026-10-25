@@ -488,13 +488,18 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${GITHUB_WORKSPACE}/.work/game"
+          # The Windows depots ship shaders_pc (DX11) next to shaders_vulkan. Source2Viewer reads material
+          # texture inputs from the first shader VPK it finds, and the Linux-only Vulkan shaders use a VCS
+          # version the pinned CLI cannot read, which breaks character exports and degrades material mapping.
           for attempt in 1 2 3; do
             if steamcmd \
+              +@sSteamCmdForcePlatformType windows \
               +force_install_dir "${GITHUB_WORKSPACE}/.work/game" \
               +login anonymous \
               +app_update 730 \
               +quit \
               && test -f "${GITHUB_WORKSPACE}/.work/game/game/csgo/pak01_dir.vpk" \
+              && test -f "${GITHUB_WORKSPACE}/.work/game/game/csgo/shaders_pc_dir.vpk" \
               && test -f "${GITHUB_WORKSPACE}/.work/game/game/csgo/steam.inf" \
               && compgen -G "${GITHUB_WORKSPACE}/.work/game/game/csgo/maps/*.vpk" >/dev/null; then
               exit 0
