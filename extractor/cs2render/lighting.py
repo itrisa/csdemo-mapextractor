@@ -14,6 +14,7 @@ import numpy as np
 import OpenEXR
 from PIL import Image
 
+from . import bc6h
 from . import textures as tx
 
 Image.MAX_IMAGE_PIXELS = None
@@ -46,7 +47,7 @@ def _masked_downsample(image: np.ndarray, factor: int, valid: np.ndarray | None)
     return np.where(count > 0, summed / np.maximum(count, 1e-6), fallback).astype(np.float32)
 
 
-# --- BC6H via texconv ---
+# --- BC6H via texconv, or the portable numpy encoder without it ---
 
 
 def _write_dds_f16_array(path: Path, layers: list[np.ndarray]) -> None:
@@ -66,9 +67,11 @@ def _write_dds_f16_array(path: Path, layers: list[np.ndarray]) -> None:
             handle.write(data.tobytes())
 
 
-def encode_bc6h(layers: list[np.ndarray], texconv: Path) -> list[bytes]:
-    """Encodes equally sized float RGBA images to BC6H (unsigned) with texconv; returns per-layer bytes."""
+def encode_bc6h(layers: list[np.ndarray], texconv: Path | None) -> list[bytes]:
+    """Encodes equally sized float RGBA images to BC6H (unsigned); returns per-layer bytes."""
     h, w = layers[0].shape[:2]
+    if texconv is None:
+        return [bc6h.encode_layer(layer) for layer in layers]
     with tempfile.TemporaryDirectory(prefix="cs2render_bc6h_") as tmp:
         source = Path(tmp) / "input.dds"
         out_dir = Path(tmp) / "out"
@@ -100,7 +103,7 @@ class LightmapResult:
     bytes: int
 
 
-def pack_lightmaps(lightmap_dir: Path, out_dir: Path, size: int, shadow_size: int, texconv: Path) -> LightmapResult:
+def pack_lightmaps(lightmap_dir: Path, out_dir: Path, size: int, shadow_size: int, texconv: Path | None) -> LightmapResult:
     total = 0
     files = {"irradiance": "lm_irradiance.ctex", "directional": "lm_directional.ctex", "shadows": "lm_shadows.ctex"}
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -267,7 +270,7 @@ def pack_probes(
     out_dir: Path,
     size: int,
     levels: int,
-    texconv: Path,
+    texconv: Path | None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Writes probes.ctex into `out_dir`; returns probe metadata and the file size."""
     probes = []

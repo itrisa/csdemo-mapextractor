@@ -140,7 +140,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     render_parser.add_argument("--map", required=True)
     render_parser.add_argument("--output-dir", type=Path, default=Path("out") / "cs2render")
     render_parser.add_argument("--source2viewer", type=Path)
-    render_parser.add_argument("--texconv", type=Path, required=True)
+    render_parser.add_argument(
+        "--texconv", type=Path, help="DirectXTex texconv for BC6H; without it a slower portable encoder is used"
+    )
     render_parser.add_argument("--texels-per-inch", type=float, default=2.0)
     render_parser.add_argument("--workers", type=int, default=8)
     render_parser.add_argument(

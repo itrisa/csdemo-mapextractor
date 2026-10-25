@@ -17,7 +17,7 @@ to read CS2's Source 2 files.
 - Python 3.11 or newer
 - Counter-Strike 2
 - Source2Viewer CLI
-- Node.js (only for `cs2weapons`)
+- Node.js (only for `cs2weapons` and `cs2render`)
 - ffmpeg with libopus (only for `cs2sounds`)
 
 Install the project with Meshopt support:
@@ -130,8 +130,10 @@ contains:
 - `visibility.bin`
 
 `visibility.bin` maps the map's baked voxel PVS onto 3D cells. Every triangle is assigned to a
-cell, so the client can skip hidden index ranges. The command needs Source2Viewer-CLI and
-[texconv](https://github.com/microsoft/DirectXTex):
+cell, so the client can skip hidden index ranges. The command needs Source2Viewer-CLI.
+[texconv](https://github.com/microsoft/DirectXTex) (Windows) encodes the BC6H lightmaps, probes and
+sky in a second or two; without `--texconv`, a portable numpy encoder of the same quality
+(`extractor/cs2render/bc6h.py`) takes about a minute per map:
 
 ```powershell
 csdemo-mapextractor cs2render --cs2-dir "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive" `
@@ -212,6 +214,33 @@ Bake every hosted map in one run: `sounds.json` and the global banks are rewritt
 The command writes to `out\cs2sounds` and caches decoded and encoded sounds in
 `out\cs2sounds-work`. Host the output as the client's `VITE_CS2_SOUNDS_URL`, or copy it to
 the client's `public/cs2sounds/` for development.
+
+## Publishing the CS2 packages
+
+The publish workflow also bakes the CS2 render packages, weapons and sounds and hosts them under
+`cs2/` in the same bucket, next to the classic release:
+
+```text
+cs2/index.json                  the current packages (Cache-Control: no-cache)
+cs2/maps/<map>/<digest>/...     one cs2render package per map (immutable)
+cs2/weapons/<digest>/...        the cs2weapons package (immutable)
+cs2/sounds/<digest>/...         the cs2sounds package (immutable)
+```
+
+`<digest>` is derived from the package's file paths and contents, so an unchanged package keeps its
+URL and isn't uploaded again. `index.json` gives each package's `path` relative to itself, with its
+`bytes` and `files`. Files are uploaded as baked (gzip inside, no `Content-Encoding`).
+`extractor/cs2publish.py publish` uploads the changed packages, then replaces the index, then
+deletes every other key under `cs2/`, so the bucket holds one version of each package. The index's
+`bake` key stays `+partial` until that cleanup finishes, and also when a map or package failed to
+bake (it keeps its published version), so the next scheduled run tries again.
+
+The `cs2-bake` job runs when the Steam build or the bake code changes (the `bake` key is the
+build id plus a digest of `extractor/cs2render`, `extractor/cs2sounds`, `extractor/cs2weapons.py`,
+`extractor/cli.py`, `weapon-bake`, the Source2Viewer build script and the requirements). It builds Source2Viewer-CLI
+from a pinned commit (`scripts/build_source2viewer_cs2.sh`), because the bakes rely on export fixes
+that aren't in a release yet, and encodes BC6H without texconv. Run the workflow with `target`
+`classic` or `cs2` to check only one of the two, and with `force` to rebuild regardless.
 
 ## License
 

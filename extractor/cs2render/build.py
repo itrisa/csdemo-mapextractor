@@ -74,7 +74,7 @@ class BuildOptions:
 
 
 def rebuild_sky(
-    executable: Path, cs2_dir: Path, entities: list[dict[str, Any]], work_dir: Path, out_dir: Path, texconv: Path
+    executable: Path, cs2_dir: Path, entities: list[dict[str, Any]], work_dir: Path, out_dir: Path, texconv: Path | None
 ) -> dict[str, Any]:
     manifest = json.loads((out_dir / "map.json").read_text(encoding="utf-8"))
     _log("sky")
@@ -479,7 +479,7 @@ def build(
     map_name: str,
     work_dir: Path,
     out_dir: Path,
-    texconv: Path,
+    texconv: Path | None,
     options: BuildOptions | None = None,
 ) -> dict[str, Any]:
     options = options or BuildOptions()

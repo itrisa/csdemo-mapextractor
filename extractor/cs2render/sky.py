@@ -106,7 +106,7 @@ def _prefab_entities(executable: Path, cs2_dir: Path, main: list[dict[str, Any]]
 
 
 def build_sky(
-    executable: Path, cs2_dir: Path, entities: list[dict[str, Any]], work_dir: Path, out_dir: Path, texconv: Path
+    executable: Path, cs2_dir: Path, entities: list[dict[str, Any]], work_dir: Path, out_dir: Path, texconv: Path | None
 ) -> dict[str, Any] | None:
     """Writes tex/sky.ctex; returns the manifest entry, or None when the map has no usable sky."""
     sky_dir = work_dir / "sky"

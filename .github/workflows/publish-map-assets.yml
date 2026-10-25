@@ -3,8 +3,14 @@ name: Publish CS2 map assets
 on:
   workflow_dispatch:
     inputs:
+      target:
+        description: Which assets to rebuild if changed (classic maps, CS2 render packages, or both)
+        required: false
+        type: choice
+        options: [all, classic, cs2]
+        default: all
       force:
-        description: Rebuild and replace the current CS2 version
+        description: Rebuild and replace the current version of the selected targets
         required: false
         type: boolean
         default: false
@@ -26,13 +32,17 @@ concurrency:
 env:
   R2_BUCKET: ${{ vars.R2_BUCKET }}
   FORCE_REBUILD: ${{ inputs.force || false }}
+  TARGET: ${{ inputs.target || 'all' }}
   PUBLISHED_INDEX: ${{ !inputs.recolor && format('{0}/index.json', vars.MAPS_PUBLIC_URL || 'https://maps.csdemo.tv') || '' }}
+  # maps baked into CS2 render packages (published under cs2/ next to the classic release)
+  CS2_MAPS: de_ancient de_anubis de_cache de_dust2 de_inferno de_mirage de_nuke de_overpass
 
 jobs:
   version:
     runs-on: ubuntu-latest
     outputs:
       build_id: ${{ steps.version.outputs.build_id }}
+      cs2_bake_key: ${{ steps.version.outputs.cs2_bake_key }}
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -47,12 +57,22 @@ jobs:
           set -euo pipefail
           build_id="$(python extractor/steam.py --key)"
           echo "build_id=${build_id}" >> "${GITHUB_OUTPUT}"
+          # the CS2 packages are rebaked when the game or the code that bakes them changes
+          code="$({
+            git ls-tree -r HEAD -- \
+              extractor/cs2render extractor/cs2sounds extractor/cs2weapons.py extractor/source2viewer.py \
+              extractor/cli.py weapon-bake scripts/build_source2viewer_cs2.sh \
+              requirements/ci-build.txt requirements/ci-runtime.txt requirements/ci-cs2.txt
+            echo "${CS2_MAPS}"
+          } | sha256sum | cut -c1-16)"
+          echo "cs2_bake_key=${build_id}-${code}" >> "${GITHUB_OUTPUT}"
 
   gate:
     needs: version
     runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.gate.outputs.changed }}
+      cs2_changed: ${{ steps.cs2_gate.outputs.changed }}
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -80,6 +100,10 @@ jobs:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
         run: |
           set -euo pipefail
+          if [[ "${TARGET}" == "cs2" ]]; then
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
           if [[ "${FORCE_REBUILD}" == "true" ]]; then
             echo "changed=true" >> "${GITHUB_OUTPUT}"
             exit 0
@@ -91,6 +115,36 @@ jobs:
           if [[ "${published}" == "${{ needs.version.outputs.build_id }}" ]]; then
             echo "changed=false" >> "${GITHUB_OUTPUT}"
             echo "Steam build ${published} is already published."
+          else
+            echo "changed=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      # separate from the classic check so a CS2 index problem cannot block the classic release
+      - name: Check current CS2 render packages
+        id: cs2_gate
+        continue-on-error: true
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          if [[ "${TARGET}" == "classic" ]]; then
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if [[ "${FORCE_REBUILD}" == "true" ]]; then
+            echo "changed=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          baked="$(python extractor/cs2publish.py current-key \
+            --bucket "${R2_BUCKET}" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com")"
+          if [[ "${baked}" == "${{ needs.version.outputs.cs2_bake_key }}" ]]; then
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+            echo "CS2 render packages ${baked} are already published."
           else
             echo "changed=true" >> "${GITHUB_OUTPUT}"
           fi
@@ -340,3 +394,214 @@ jobs:
 
       - name: Summarize
         run: echo "Published CS2 Steam build ${{ needs.version.outputs.build_id }}." >> "${GITHUB_STEP_SUMMARY}"
+
+  cs2-bake:
+    needs: [version, gate]
+    if: needs.gate.outputs.cs2_changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+
+      - name: Install SteamCMD
+        uses: andriivitiv/setup-steamcmd@36b19fc86c5f39214c643bb631aeb86edf5ccafa # v1
+
+      - name: Free runner storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          # preinstalled toolchains the bake does not use; CS2 alone takes most of the disk
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift
+          df -h "${GITHUB_WORKSPACE}"
+
+      - name: Require sufficient runner storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          available_kib="$(df -Pk "${GITHUB_WORKSPACE}" | awk 'NR == 2 {print $4}')"
+          required_kib=$((80 * 1024 * 1024))
+          if [[ ! "${available_kib}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Unable to determine available runner storage."
+            exit 1
+          fi
+          if (( available_kib < required_kib )); then
+            echo "::error::At least 80 GiB free is required to install CS2 and bake its render packages."
+            exit 1
+          fi
+
+      - name: Install hash-locked bake dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -yq --no-install-recommends ffmpeg
+          ffmpeg -hide_banner -encoders | grep -q libopus
+          python -m pip install --require-hashes -r requirements/ci-build.txt
+          python -m pip install --no-build-isolation --no-deps --require-hashes -r requirements/ci-runtime.txt
+          python -m pip install --require-hashes -r requirements/ci-cs2.txt
+          python -m pip install --no-build-isolation --no-deps -e .
+          python -c "import etcpak, OpenEXR, PIL, extractor.cs2render.build, extractor.cs2sounds, extractor.cs2weapons"
+          npm ci --no-audit --no-fund --prefix weapon-bake
+
+      - name: Download CS2
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${GITHUB_WORKSPACE}/.work/game"
+          for attempt in 1 2 3; do
+            if steamcmd \
+              +force_install_dir "${GITHUB_WORKSPACE}/.work/game" \
+              +login anonymous \
+              +app_update 730 \
+              +quit \
+              && test -f "${GITHUB_WORKSPACE}/.work/game/game/csgo/pak01_dir.vpk" \
+              && test -f "${GITHUB_WORKSPACE}/.work/game/game/csgo/steam.inf" \
+              && compgen -G "${GITHUB_WORKSPACE}/.work/game/game/csgo/maps/*.vpk" >/dev/null; then
+              exit 0
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              echo "CS2 installation failed validation after ${attempt} attempts." >&2
+              exit 1
+            fi
+            sleep 15
+          done
+
+      - name: Build Source2Viewer CLI
+        run: bash scripts/build_source2viewer_cs2.sh
+
+      # each package is moved into out/cs2 only when its bake succeeded; the publish step keeps the
+      # published version of anything missing, so one failed map does not block the others
+      - name: Bake maps
+        shell: bash
+        run: |
+          set -euo pipefail
+          s2v="${GITHUB_WORKSPACE}/tools/source2viewer-cs2/Source2Viewer-CLI"
+          mkdir -p out/cs2/maps
+          failed=()
+          for map in ${CS2_MAPS}; do
+            echo "::group::${map}"
+            start="${SECONDS}"
+            if python -m extractor.cli cs2render \
+              --cs2-dir "${GITHUB_WORKSPACE}/.work/game" \
+              --map "${map}" \
+              --source2viewer "${s2v}" \
+              --output-dir "${GITHUB_WORKSPACE}/.work/cs2render" \
+              --workers "$(nproc)" > "out/cs2-${map}.json"; then
+              mv "${GITHUB_WORKSPACE}/.work/cs2render/${map}/package" "out/cs2/maps/${map}"
+              echo "${map}: $(du -sh "out/cs2/maps/${map}" | cut -f1) in $(( (SECONDS - start) / 60 )) min" >> "${GITHUB_STEP_SUMMARY}"
+            else
+              failed+=("${map}")
+              echo "::warning::${map} failed to bake; its published version is kept."
+            fi
+            rm -rf "${GITHUB_WORKSPACE}/.work/cs2render/${map}"
+            df -h "${GITHUB_WORKSPACE}" | tail -n 1
+            echo "::endgroup::"
+          done
+          if [[ -z "$(ls -A out/cs2/maps)" ]]; then
+            echo "::error::No map baked."
+            exit 1
+          fi
+          if (( ${#failed[@]} )); then
+            echo "Failed maps: ${failed[*]}" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Bake weapons and characters
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="${GITHUB_WORKSPACE}/.work/cs2weapons"
+          if python -m extractor.cli cs2weapons \
+            --cs2-dir "${GITHUB_WORKSPACE}/.work/game" \
+            --source2viewer "${GITHUB_WORKSPACE}/tools/source2viewer-cs2/Source2Viewer-CLI" \
+            --output-dir "${work}/package" \
+            --work-dir "${work}/export" > out/cs2-weapons.json; then
+            mv "${work}/package" out/cs2/weapons
+          else
+            echo "::warning::The weapon bake failed; the published weapons are kept."
+          fi
+          rm -rf "${work}"
+
+      - name: Bake sounds
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="${GITHUB_WORKSPACE}/.work/cs2sounds"
+          # shellcheck disable=SC2086
+          if python -m extractor.cli cs2sounds \
+            --cs2-dir "${GITHUB_WORKSPACE}/.work/game" \
+            --source2viewer "${GITHUB_WORKSPACE}/tools/source2viewer-cs2/Source2Viewer-CLI" \
+            --maps ${CS2_MAPS} \
+            --output-dir "${work}/package" \
+            --work-dir "${work}/cache" > out/cs2-sounds.json; then
+            mv "${work}/package" out/cs2/sounds
+          else
+            echo "::warning::The sound bake failed; the published sounds are kept."
+          fi
+          rm -rf "${work}"
+          du -sh out/cs2/* >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload render packages for publication
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cs2-render-${{ needs.version.outputs.build_id }}
+          path: out/cs2
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  cs2-publish:
+    needs: [version, cs2-bake]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Download render packages
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: cs2-render-${{ needs.version.outputs.build_id }}
+          path: out/cs2
+
+      # uploads changed packages, swaps cs2/index.json, then deletes every older version under cs2/
+      - name: Publish render packages to R2
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086
+          python extractor/cs2publish.py publish \
+            --bucket "${R2_BUCKET}" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            --maps-dir out/cs2/maps \
+            --weapons-dir out/cs2/weapons \
+            --sounds-dir out/cs2/sounds \
+            --expected-maps ${CS2_MAPS} \
+            --steam-build-id "${{ needs.version.outputs.build_id }}" \
+            --bake-key "${{ needs.version.outputs.cs2_bake_key }}" | tee out/cs2-publish.json
+          {
+            echo "### CS2 render packages"
+            jq -r '"Uploaded \(.uploaded) files (\(.uploaded_bytes / 1048576 | floor) MiB), deleted \(.deleted) old files."' out/cs2-publish.json
+            jq -r '.index.maps | to_entries[] | "- \(.key): \(.value.path) (\(.value.bytes / 1048576 | floor) MiB)"' out/cs2-publish.json
+            jq -r '"- unchanged: \(.unchanged | join(", "))", "- carried over: \(.carried_over | join(", "))", "- missing: \(.missing | join(", "))"' out/cs2-publish.json
+          } >> "${GITHUB_STEP_SUMMARY}"
