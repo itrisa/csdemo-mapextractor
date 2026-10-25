@@ -557,10 +557,10 @@ jobs:
           retention-days: 1
           compression-level: 0
 
-  # a target whose bake failed keeps its published version (cs2publish carries it over)
+  # a target whose bake failed keeps its published version (cs2publish carries it over); a cancelled run publishes nothing
   cs2-publish:
     needs: [version, gate, cs2-bake]
-    if: always() && needs.gate.outputs.cs2_changed == 'true' && needs.cs2-bake.result != 'cancelled'
+    if: ${{ !cancelled() && needs.gate.outputs.cs2_changed == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
