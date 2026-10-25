@@ -32,6 +32,8 @@ import time
 from pathlib import Path
 from typing import Sequence
 
+from . import source2viewer
+
 BAKE_DIR = Path(__file__).resolve().parent.parent / "weapon-bake"
 
 # Every knife in the default finish: model folder name under weapons/models/knife/knife_<name>/, and its
@@ -290,12 +292,20 @@ def _export(cli: Path, vpk: Path, paths: Sequence[str], to: Path, extra: Sequenc
     else:
         to.mkdir(parents=True, exist_ok=True)
         output = to
-    subprocess.run(
-        [str(cli), "-i", str(vpk), "-d", "-f", ",".join(paths), "-o", str(output), *extra],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+    _run_cli([str(cli), "-i", str(vpk), "-d", "-f", ",".join(paths), "-o", str(output), *extra])
+
+
+_last_cli_output = ""
+
+
+def _run_cli(args: list[str]) -> None:
+    global _last_cli_output
+    _last_cli_output = source2viewer.run_quiet(args)
+
+
+def _export_error(message: str) -> RuntimeError:
+    """An export error carrying Source2Viewer's last output, which is otherwise not shown."""
+    return RuntimeError(f"{message}\n{_last_cli_output}")
 
 
 def _node(script: str, args: Sequence[str]) -> None:
@@ -318,29 +328,23 @@ def bake_world(cli: Path, vpk: Path, work_dir: Path, out_dir: Path, only: set[st
         if not export.is_file():
             _log(f"exporting world model {name}")
             export.parent.mkdir(parents=True, exist_ok=True)
-            subprocess.run(
+            _run_cli(
                 [str(cli), "-i", str(vpk), "-d", "-f", f"weapons/models/{path}.vmdl_c", "-o", str(export),
-                 "--gltf_export_format", "glb", "--gltf_export_materials", "--gltf_textures_adapt"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
+                 "--gltf_export_format", "glb", "--gltf_export_materials", "--gltf_textures_adapt"]
             )
             if not export.is_file():
-                raise RuntimeError(f"export failed for {name} ({path})")
+                raise _export_error(f"export failed for {name} ({path})")
         _node("bake-weapon-model.mjs", [str(export), str(out_dir / f"{name}.glb"), f"--target-verts={target_verts}"])
         skeleton = work_dir / name / "skeleton" / f"{name}.glb"
         if not skeleton.is_file():
             # Exporting animations is what makes Source2Viewer write the skeleton; no clip is needed.
             skeleton.parent.mkdir(parents=True, exist_ok=True)
-            subprocess.run(
+            _run_cli(
                 [str(cli), "-i", str(vpk), "-d", "-f", f"weapons/models/{path}.vmdl_c", "-o", str(skeleton),
-                 "--gltf_export_format", "glb", "--gltf_export_animations", "--gltf_animation_list", "__none__"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
+                 "--gltf_export_format", "glb", "--gltf_export_animations", "--gltf_animation_list", "__none__"]
             )
             if not skeleton.is_file():
-                raise RuntimeError(f"skeleton export failed for {name} ({path})")
+                raise _export_error(f"skeleton export failed for {name} ({path})")
         _node("weapon-attach.mjs", [str(skeleton), str(out_dir / f"{name}.glb")])
 
 
@@ -349,7 +353,7 @@ def _export_model(cli: Path, vpk: Path, textures: Path, vpk_path: str) -> Path:
     _export(cli, vpk, [vpk_path], textures, [*GLTF, "--gltf_export_materials", "--gltf_textures_adapt"], ".glb")
     file = textures / re.sub(r"\.[^./]+$", ".glb", re.sub(r"_c$", "", vpk_path))
     if not file.is_file():
-        raise RuntimeError(f"model export failed: {vpk_path}")
+        raise _export_error(f"model export failed: {vpk_path}")
     return file
 
 
@@ -367,7 +371,7 @@ def viewmodel_role_clips(
     result: dict[str, dict[str, str]] = {}
     for name, _path, graph, clip_filter in selected:
         if not graph_file(graph).is_file():
-            raise RuntimeError(f"graph export failed for {name} ({graph})")
+            raise _export_error(f"graph export failed for {name} ({graph})")
         text = graph_file(graph).read_text(encoding="utf-8", errors="replace")
         clips = list(dict.fromkeys(re.findall(r'm_clip = "([^"]+)\.vnmclip"', text)))
         if clip_filter:
@@ -402,7 +406,7 @@ def bake_viewmodels(cli: Path, vpk: Path, work_dir: Path, out_dir: Path, only: s
             _export(cli, vpk, [f"{clip}.vnmclip_c" for clip in picked.values()], clip_dir, GLTF)
             lost = [str(file) for file in clip_files.values() if not file.is_file()]
             if lost:
-                raise RuntimeError(f"clip export failed for {name}: {lost}")
+                raise _export_error(f"clip export failed for {name}: {lost}")
         _log(f"baking viewmodel {name}")
         model = _export_model(cli, vpk, textures, f"weapons/models/{path}.vmdl_c")
         _node(
@@ -424,7 +428,7 @@ def bake_characters(
             _log(f"exporting character model {side}")
             _export(cli, vpk, [path], work_dir / "models" / side, CHARACTER_MODEL_ARGS, ".glb")
             if not export.is_file():
-                raise RuntimeError(f"character export failed: {path}")
+                raise _export_error(f"character export failed: {path}")
         exports[side] = export
     for side, _ in models:
         _log(f"baking character {side}")
@@ -445,7 +449,7 @@ def bake_characters(
             _export(cli, vpk, [f"{path}.vnmclip_c" for path in missing[start:start + 60]], clip_dir, GLTF, ".glb")
         lost = [str(files[name]) for name, _, _ in clips if not files[name].is_file()]
         if lost:
-            raise RuntimeError(f"character clip export failed: {lost}")
+            raise _export_error(f"character clip export failed: {lost}")
     spec = work_dir / "anims.json"
     spec.write_text(
         json.dumps({

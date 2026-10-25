@@ -59,6 +59,15 @@ def version(executable: Path) -> str:
     return first_line[len(prefix) :].strip() if first_line.startswith(prefix) else first_line
 
 
+def run_quiet(args: list[str]) -> str:
+    """Runs the CLI, whose output is mostly harmless shader warnings; returns an excerpt for error messages."""
+    completed = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+    # Exceptions start with the failing file and message, so the head of stderr matters more than its stack tail.
+    stdout = completed.stdout.strip().splitlines()[-10:]
+    stderr = completed.stderr.strip().splitlines()[:30]
+    return "\n".join([*stdout, *stderr, f"(Source2Viewer-CLI exit code {completed.returncode})"])
+
+
 def extract_world_physics(
     executable: Path, cs2_dir: Path, map_name: str, *, materials: bool = True
 ) -> bytes:
