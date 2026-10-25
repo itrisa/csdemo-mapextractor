@@ -1,0 +1,5 @@
+# CS2 render package, weapon and sound bake dependencies (cs2render, cs2weapons, cs2sounds). Compile with:
+#   uv pip compile requirements/ci-cs2.in --constraint requirements/ci-build.txt --generate-hashes --python-version 3.11 --python-platform x86_64-manylinux_2_35 -o requirements/ci-cs2.txt
+etcpak==0.9.15
+OpenEXR==3.5.2
+pillow==12.3.0

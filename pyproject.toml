@@ -24,12 +24,22 @@ color = [
 	"shapely>=2.0",
 	"triangle>=20250106",
 ]
+cs2render = [
+	"etcpak>=0.9.15",
+	"meshoptimizer==0.2.30a0",
+	"numpy>=2.0",
+	"OpenEXR>=3.3",
+	"pillow>=10",
+]
+cs2sounds = [
+	"numpy>=2.0",
+]
 
 [project.scripts]
 csdemo-mapextractor = "csdemo_mapextractor.cli:main"
 
 [tool.setuptools]
-packages = ["csdemo_mapextractor", "csdemo_mapextractor.color"]
+packages = ["csdemo_mapextractor", "csdemo_mapextractor.color", "csdemo_mapextractor.cs2render", "csdemo_mapextractor.cs2sounds"]
 package-dir = { csdemo_mapextractor = "extractor" }
 
 [tool.pytest.ini_options]

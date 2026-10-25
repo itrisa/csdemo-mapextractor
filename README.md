@@ -17,6 +17,8 @@ to read CS2's Source 2 files.
 - Python 3.11 or newer
 - Counter-Strike 2
 - Source2Viewer CLI
+- Node.js (only for `cs2weapons` and `cs2render`)
+- ffmpeg with libopus (only for `cs2sounds`)
 
 Install the project with Meshopt support:
 
@@ -113,6 +115,134 @@ neither are released uncoloured.
 The publish workflow builds the bundles, colours the planned maps in a matrix
 job (one runner per map) and attaches the results before publishing. Run it
 with `recolor` to colour every map regardless of what's published.
+
+## CS2 render packages
+
+`cs2render` builds the compact package that csdemo-client's `CS2` map mode renders. It
+contains:
+
+- meshopt-compressed geometry (`geo/`), each chunk with a simplified far LOD index list
+  (`--lod-error`, in world units; 0 disables it)
+- block-compressed (BC) texture arrays and baked lightmaps (`tex/`). Desktop GPUs sample them
+  natively; clients without the BC WebGL extensions (phones) use the classified map
+- the environment cubemaps and light-probe volumes
+- the colour-correction LUT
+- `visibility.bin`
+
+`visibility.bin` maps the map's baked voxel PVS onto 3D cells. Every triangle is assigned to a
+cell, so the client can skip hidden index ranges. The command needs Source2Viewer-CLI.
+[texconv](https://github.com/microsoft/DirectXTex) (Windows) encodes the BC6H lightmaps, probes and
+sky in a second or two; without `--texconv`, a portable numpy encoder of the same quality
+(`extractor/cs2render/bc6h.py`) takes about a minute per map:
+
+```powershell
+csdemo-mapextractor cs2render --cs2-dir "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive" `
+  --map de_inferno --texconv "$env:LOCALAPPDATA\csdemo-tools\texconv.exe"
+```
+
+The package is written to `out\cs2render\<map>\package`. `--geometry-only` rebuilds just the
+geometry and `visibility.bin` of an existing package. `--sky-only` rebuilds just `tex/sky.ctex`,
+the map's `env_sky` panorama. That file is a 2048×640 BC6H latlong with the sky's brightness and
+yaw baked in, 0.2–1.1 MB gzipped (see `extractor/cs2render/sky.py`). Every binary file is stored gzipped
+(manifest version 5, `compression: "gzip"`) so a static host serves it compressed; `--no-compress`
+writes raw files. A package is about 45–150 MB (Mirage is the smallest, Ancient the largest), and
+the client downloads all of it. The build takes 3–12 minutes once the export is cached.
+
+The package also includes `lightgrid.bin`, which lights dynamic objects such as weapons. It
+resamples the map's light-probe volumes into small uint8 grids:
+
+- a six-direction ambient cube: luminance every 64×64×48 units, colour every 128×128×96
+- the baked sun visibility every 32 units
+
+The file is gzipped, about 1.4 MB for Inferno. The format is described in
+`extractor/cs2render/lightgrid.py`.
+
+The package also holds `breaks/<model>.glb`, the break pieces of the map's doors, windows and vents.
+Their objects in `map.json` carry `breaks` (the file, `glass`, and `tint`, the entity's linear
+`rendercolor`). The pieces are placed in their parent model's frame, decimated, and baked with
+vertex-colour materials, including the `csgo_complex` tint mask. Building them needs Node and
+`npm install --prefix weapon-bake`. `--breaks-only` rebuilds just the pieces and the `breaks`
+fields of an existing package. See `extractor/cs2render/breakables.py` and
+`weapon-bake/bake-break-pieces.mjs`.
+
+## CS2 weapon models
+
+`cs2weapons` bakes the weapon and player models that csdemo-client draws:
+
+| Output | Contents |
+|---|---|
+| `world/<name>.glb` | Dropped weapons, grenades in flight and the weapons players hold. 42 reduced world models with per-vertex linear albedo and AO/roughness/metalness, meshopt-compressed, about 1.2 MB in total. Node extras `weaponBone` hold the attach point for a player's hand. |
+| `fp/<name>.glb` and `fp/arms.glb` | First-person viewmodels. 44 skinned weapons plus the arms, with the game's AnimGraph2 clips and WebP colour, ORM and normal maps, about 19 MB in total. The client loads them one weapon at a time. |
+| `characters/ct.glb`, `t.glb` and `anims.bin` | Third-person players for the client's CS2 look: the SAS and Phoenix agents (skinned, half the triangles, 1024 px WebP maps; 0.7 and 1.0 MB) and the shared third-person clips (about 0.8 MB). |
+
+Install the Node bake scripts once, then run the bake:
+
+```powershell
+npm install --prefix weapon-bake
+csdemo-mapextractor cs2weapons --cs2-dir "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive"
+# Bake only some models, or only some of the sets (world, fp, characters):
+#   --only ak47 glock arms   --set world   --target-verts 15%   --texture-size 512
+#   --set characters   --character-texture-size 1024   --character-ratio 0.5
+```
+
+The command writes to `out\cs2weapons` and caches Source2Viewer exports in
+`out\cs2weapons-work`. Host the output as the client's `VITE_CS2_WEAPONS_URL`, or copy it
+to the client's `public/cs2weapons/` for development.
+
+## CS2 sounds
+
+`cs2sounds` bakes the game audio that csdemo-client plays in its CS2 view. Every sound is
+re-encoded to Ogg Opus, 48 kHz mono, and concatenated into banks the client slices by offset:
+
+| Output | Contents |
+|---|---|
+| `sounds.json` | The sound table (`[bank, offset, length]`), the soundevents the client plays with their volume, pitch, distance and fade curves, instance limits, delays and child events, the events the client starts from demo data, each weapon's shot event and its first-person foley (sound events of the viewmodel clips, as fractions of the clip). |
+| `core.bin` | Grenades, the bomb, hits and deaths, bullet cracks, breaks, doors, knife swings, jump and gear sounds, the announcer's plant, defuse and round-win lines, and foley several weapons share (about 1.6 MB at 48 kbps). Always loaded. |
+| `weapon_<name>.bin` | One weapon's shot (with its distant layer) and its own foley, 7–80 KB. Loaded for the weapons a demo uses. |
+| `maps/<map>.json`, `<map>.bin` | The map's soundscapes (`env_soundscape`), point sounds (`point_soundevent`), and the footsteps, landings and bullet impacts of the surfaces the map has (about 1 MB on Inferno). |
+| `maps/<map>_ambience.bin` | Soundscape beds and music at 16 kbps (`--ambience-kbps`), 0.75–2.7 MB per map. The client fetches one sound at a time with Range requests when a soundscape first needs it. Events come from `soundevents/ambience/game_sounds_<map>` and from the files named by the map's soundscape prefixes (Ancient plays `aztec.*`). |
+| `maps/<map>_surfaces.bin` | A gzip-compressed footstep-surface grid baked from the map's collision: 32-unit cells, with every walkable floor layer's height and surface (about 60 KB). |
+
+The bake needs an `ffmpeg` with libopus (`--ffmpeg` or the `FFMPEG` environment variable):
+
+```powershell
+csdemo-mapextractor cs2sounds --cs2-dir "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive" --maps de_inferno de_ancient de_anubis de_cache de_dust2 de_mirage de_nuke de_overpass
+```
+
+Bake every hosted map in one run: `sounds.json` and the global banks are rewritten each time.
+
+The command writes to `out\cs2sounds` and caches decoded and encoded sounds in
+`out\cs2sounds-work`. Host the output as the client's `VITE_CS2_SOUNDS_URL`, or copy it to
+the client's `public/cs2sounds/` for development.
+
+## Publishing the CS2 packages
+
+The publish workflow also bakes the CS2 render packages, weapons and sounds and hosts them under
+`cs2/` in the same bucket, next to the classic release:
+
+```text
+cs2/index.json                  the current packages (Cache-Control: no-cache)
+cs2/maps/<map>/<digest>/...     one cs2render package per map (immutable)
+cs2/weapons/<digest>/...        the cs2weapons package (immutable)
+cs2/sounds/<digest>/...         the cs2sounds package (immutable)
+```
+
+`<digest>` is derived from the package's file paths and contents, so an unchanged package keeps its
+URL and isn't uploaded again. `index.json` gives each package's `path` relative to itself, with its
+`bytes` and `files`. Files are uploaded as baked (gzip inside, no `Content-Encoding`).
+`extractor/cs2publish.py publish` uploads the changed packages, then replaces the index, then
+deletes every other key under `cs2/`, so the bucket holds one version of each package. The index's
+`bake` key stays `+partial` until that cleanup finishes, and also when a map or package failed to
+bake (it keeps its published version), so the next scheduled run tries again.
+
+The `cs2-bake` jobs run when the Steam build or the bake code changes (the `bake` key is the
+build id plus a digest of `extractor/cs2render`, `extractor/cs2sounds`, `extractor/cs2weapons.py`,
+`extractor/cli.py`, `weapon-bake`, the Source2Viewer build script and the requirements). There is one job per map,
+plus one for weapons and one for sounds; each downloads CS2 on its own runner, so they bake in
+parallel. A target whose job fails keeps its published version. Each job builds Source2Viewer-CLI
+from a pinned commit (`scripts/build_source2viewer_cs2.sh`), because the bakes rely on export fixes
+that aren't in a release yet, and encodes BC6H without texconv. Run the workflow with `target`
+`classic` or `cs2` to check only one of the two, and with `force` to rebuild regardless.
 
 ## License
 

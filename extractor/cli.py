@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 from typing import Sequence
@@ -132,7 +133,119 @@ def main(argv: Sequence[str] | None = None) -> int:
     current_parser.add_argument("--aws", default="aws")
     current_parser.add_argument("--profile")
 
+    render_parser = subparsers.add_parser(
+        "cs2render", help="build the CS2-look render package (textures, lightmaps, probes, geometry) of one map"
+    )
+    render_parser.add_argument("--cs2-dir", type=Path, required=True)
+    render_parser.add_argument("--map", required=True)
+    render_parser.add_argument("--output-dir", type=Path, default=Path("out") / "cs2render")
+    render_parser.add_argument("--source2viewer", type=Path)
+    render_parser.add_argument(
+        "--texconv", type=Path, help="DirectXTex texconv for BC6H; without it a slower portable encoder is used"
+    )
+    render_parser.add_argument("--texels-per-inch", type=float, default=2.0)
+    render_parser.add_argument("--workers", type=int, default=8)
+    render_parser.add_argument(
+        "--lod-error", type=float, default=4.0, help="absolute simplification error of each chunk's far LOD, in inches"
+    )
+    render_parser.add_argument(
+        "--no-compress", action="store_true", help="write package files uncompressed instead of gzipped"
+    )
+    render_parser.add_argument(
+        "--geometry-only", action="store_true", help="rebuild only the geometry of an existing package"
+    )
+    render_parser.add_argument(
+        "--light-grid-only", action="store_true", help="rebuild only the dynamic-object light grid of an existing package"
+    )
+    render_parser.add_argument(
+        "--sky-only", action="store_true", help="rebuild only the sky panorama of an existing package"
+    )
+    render_parser.add_argument(
+        "--breaks-only", action="store_true", help="rebuild only the breakables' pieces of an existing package"
+    )
+
+    weapons_parser = subparsers.add_parser(
+        "cs2weapons", help="bake the weapon world models and first-person viewmodels for the web client"
+    )
+    weapons_parser.add_argument("--cs2-dir", type=Path, required=True)
+    weapons_parser.add_argument("--output-dir", type=Path, default=Path("out") / "cs2weapons")
+    weapons_parser.add_argument("--work-dir", type=Path, help="export cache (default <output-dir>/../cs2weapons-work)")
+    weapons_parser.add_argument("--source2viewer", type=Path)
+    weapons_parser.add_argument("--only", nargs="*", default=[], help="model names (e.g. ak47 glock arms; ct t anims)")
+    weapons_parser.add_argument(
+        "--set", nargs="*", default=["world", "fp", "characters"], choices=["world", "fp", "characters"], dest="sets"
+    )
+    weapons_parser.add_argument("--target-verts", default="15%", help="world-model vertex budget, count or share")
+    weapons_parser.add_argument("--texture-size", type=int, default=512, help="viewmodel colour map long side")
+    weapons_parser.add_argument("--character-texture-size", type=int, default=1024, help="player colour map long side")
+    weapons_parser.add_argument("--character-ratio", type=float, default=0.5, help="player triangle share kept")
+
+    sounds_parser = subparsers.add_parser(
+        "cs2sounds", help="bake CS2's game audio (Opus banks, soundevents, ambience, footstep surfaces) for the web client"
+    )
+    sounds_parser.add_argument("--cs2-dir", type=Path, required=True)
+    sounds_parser.add_argument("--maps", nargs="*", default=["de_inferno"])
+    sounds_parser.add_argument("--output-dir", type=Path, default=Path("out") / "cs2sounds")
+    sounds_parser.add_argument("--work-dir", type=Path, help="decode/encode cache (default <output-dir>/../cs2sounds-work)")
+    sounds_parser.add_argument("--source2viewer", type=Path)
+    sounds_parser.add_argument("--ffmpeg", default=os.environ.get("FFMPEG", "ffmpeg"), help="ffmpeg with libopus")
+    sounds_parser.add_argument("--ambience-kbps", type=int, default=16, help="Opus bitrate of soundscape beds and music")
+
     arguments = parser.parse_args(argv)
+    if arguments.command == "cs2sounds":
+        from . import cs2sounds
+
+        report = cs2sounds.build(
+            source2viewer.resolve(arguments.source2viewer),
+            arguments.cs2_dir,
+            arguments.maps,
+            arguments.output_dir,
+            arguments.work_dir or arguments.output_dir.parent / "cs2sounds-work",
+            arguments.ffmpeg,
+            arguments.ambience_kbps,
+        )
+        print(json.dumps(report, indent=2))
+        return 0
+    if arguments.command == "cs2weapons":
+        from . import cs2weapons
+
+        report = cs2weapons.build(
+            source2viewer.resolve(arguments.source2viewer),
+            arguments.cs2_dir,
+            arguments.output_dir,
+            arguments.work_dir or arguments.output_dir.parent / "cs2weapons-work",
+            only=arguments.only,
+            target_verts=arguments.target_verts,
+            texture_size=arguments.texture_size,
+            sets=arguments.sets,
+            character_texture_size=arguments.character_texture_size,
+            character_ratio=arguments.character_ratio,
+        )
+        print(json.dumps(report, indent=2))
+        return 0
+    if arguments.command == "cs2render":
+        from .cs2render.build import BuildOptions, build
+
+        report = build(
+            source2viewer.resolve(arguments.source2viewer),
+            arguments.cs2_dir,
+            arguments.map,
+            arguments.output_dir / arguments.map,
+            arguments.output_dir / arguments.map / "package",
+            arguments.texconv,
+            BuildOptions(
+                texels_per_inch=arguments.texels_per_inch,
+                workers=arguments.workers,
+                lod_error=arguments.lod_error,
+                compress=not arguments.no_compress,
+                geometry_only=arguments.geometry_only,
+                light_grid_only=arguments.light_grid_only,
+                sky_only=arguments.sky_only,
+                breaks_only=arguments.breaks_only,
+            ),
+        )
+        print(json.dumps(report, indent=2))
+        return 0
     if arguments.command == "doctor":
         return _doctor(arguments)
     if arguments.command == "extract":

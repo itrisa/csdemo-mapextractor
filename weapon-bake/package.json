@@ -1,0 +1,16 @@
+﻿{
+    "name":  "csdemo-weapon-bake",
+    "private":  true,
+    "type":  "module",
+    "description":  "Node bake step of the extractor\u0027s cs2weapons command (mesh simplification, texture and glTF encoding).",
+    "dependencies":  {
+                         "@gltf-transform/core":  "^4.4.0",
+                         "@gltf-transform/extensions":  "^4.4.0",
+                         "@gltf-transform/functions":  "^4.4.0",
+                         "meshoptimizer":  "^1.3.0",
+                         "sharp":  "^0.34.5"
+                     },
+    "overrides":  {
+                      "sharp":  "$sharp"
+                  }
+}
