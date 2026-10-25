@@ -43,6 +43,7 @@ jobs:
     outputs:
       build_id: ${{ steps.version.outputs.build_id }}
       cs2_bake_key: ${{ steps.version.outputs.cs2_bake_key }}
+      cs2_targets: ${{ steps.version.outputs.cs2_targets }}
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -66,6 +67,9 @@ jobs:
             echo "${CS2_MAPS}"
           } | sha256sum | cut -c1-16)"
           echo "cs2_bake_key=${build_id}-${code}" >> "${GITHUB_OUTPUT}"
+          # one parallel bake job per map, plus weapons and sounds
+          targets="$(jq -cn --arg maps "${CS2_MAPS}" '$maps | split(" ") | map(select(. != "")) + ["weapons", "sounds"]')"
+          echo "cs2_targets=${targets}" >> "${GITHUB_OUTPUT}"
 
   gate:
     needs: version
@@ -395,11 +399,16 @@ jobs:
       - name: Summarize
         run: echo "Published CS2 Steam build ${{ needs.version.outputs.build_id }}." >> "${GITHUB_STEP_SUMMARY}"
 
+  # every target downloads CS2 on its own runner, so the maps, weapons and sounds bake in parallel
   cs2-bake:
     needs: [version, gate]
     if: needs.gate.outputs.cs2_changed == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 345
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.version.outputs.cs2_targets) }}
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -410,10 +419,24 @@ jobs:
           python-version: "3.11"
           cache: pip
 
+      # pinned SDK from the release CDN (setup-dotnet's blob-storage feed has had outages)
       - name: Set up .NET
-        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
-        with:
-          dotnet-version: "10.0.x"
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=10.0.403
+          sha512=b7b3d8461cf98b07d2552ce9199702fa3ad010ac2671a5f8cd5136f7534e50f6855ba7bbb02b11494563f1d04156276a31cda1103b900e5eecd0d9473dc7b9c5
+          archive="${RUNNER_TEMP}/dotnet-sdk.tar.gz"
+          curl -fsSL --retry 5 -o "${archive}" \
+            "https://builds.dotnet.microsoft.com/dotnet/Sdk/${version}/dotnet-sdk-${version}-linux-x64.tar.gz"
+          echo "${sha512}  ${archive}" | sha512sum -c -
+          mkdir -p "${RUNNER_TEMP}/dotnet"
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}/dotnet"
+          rm "${archive}"
+          echo "DOTNET_ROOT=${RUNNER_TEMP}/dotnet" >> "${GITHUB_ENV}"
+          echo "DOTNET_CLI_TELEMETRY_OPTOUT=1" >> "${GITHUB_ENV}"
+          echo "${RUNNER_TEMP}/dotnet" >> "${GITHUB_PATH}"
+          "${RUNNER_TEMP}/dotnet/dotnet" --version
 
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -486,88 +509,53 @@ jobs:
       - name: Build Source2Viewer CLI
         run: bash scripts/build_source2viewer_cs2.sh
 
-      # each package is moved into out/cs2 only when its bake succeeded; the publish step keeps the
-      # published version of anything missing, so one failed map does not block the others
-      - name: Bake maps
+      - name: Bake ${{ matrix.target }}
         shell: bash
+        env:
+          TARGET_NAME: ${{ matrix.target }}
         run: |
           set -euo pipefail
           s2v="${GITHUB_WORKSPACE}/tools/source2viewer-cs2/Source2Viewer-CLI"
+          game="${GITHUB_WORKSPACE}/.work/game"
+          work="${GITHUB_WORKSPACE}/.work/bake"
           mkdir -p out/cs2/maps
-          failed=()
-          for map in ${CS2_MAPS}; do
-            echo "::group::${map}"
-            start="${SECONDS}"
-            if python -m extractor.cli cs2render \
-              --cs2-dir "${GITHUB_WORKSPACE}/.work/game" \
-              --map "${map}" \
-              --source2viewer "${s2v}" \
-              --output-dir "${GITHUB_WORKSPACE}/.work/cs2render" \
-              --workers "$(nproc)" > "out/cs2-${map}.json"; then
-              mv "${GITHUB_WORKSPACE}/.work/cs2render/${map}/package" "out/cs2/maps/${map}"
-              echo "${map}: $(du -sh "out/cs2/maps/${map}" | cut -f1) in $(( (SECONDS - start) / 60 )) min" >> "${GITHUB_STEP_SUMMARY}"
-            else
-              failed+=("${map}")
-              echo "::warning::${map} failed to bake; its published version is kept."
-            fi
-            rm -rf "${GITHUB_WORKSPACE}/.work/cs2render/${map}"
-            df -h "${GITHUB_WORKSPACE}" | tail -n 1
-            echo "::endgroup::"
-          done
-          if [[ -z "$(ls -A out/cs2/maps)" ]]; then
-            echo "::error::No map baked."
-            exit 1
-          fi
-          if (( ${#failed[@]} )); then
-            echo "Failed maps: ${failed[*]}" >> "${GITHUB_STEP_SUMMARY}"
-          fi
+          start="${SECONDS}"
+          case "${TARGET_NAME}" in
+            weapons)
+              python -m extractor.cli cs2weapons --cs2-dir "${game}" --source2viewer "${s2v}" \
+                --output-dir "${work}/package" --work-dir "${work}/export"
+              package=out/cs2/weapons
+              ;;
+            sounds)
+              # shellcheck disable=SC2086
+              python -m extractor.cli cs2sounds --cs2-dir "${game}" --source2viewer "${s2v}" --maps ${CS2_MAPS} \
+                --output-dir "${work}/package" --work-dir "${work}/cache"
+              package=out/cs2/sounds
+              ;;
+            *)
+              python -m extractor.cli cs2render --cs2-dir "${game}" --source2viewer "${s2v}" --map "${TARGET_NAME}" \
+                --output-dir "${work}" --workers "$(nproc)"
+              mv "${work}/${TARGET_NAME}/package" "${work}/package"
+              package="out/cs2/maps/${TARGET_NAME}"
+              ;;
+          esac
+          mv "${work}/package" "${package}"
+          echo "${TARGET_NAME}: $(du -sh "${package}" | cut -f1) in $(( (SECONDS - start) / 60 )) min" >> "${GITHUB_STEP_SUMMARY}"
+          df -h "${GITHUB_WORKSPACE}" | tail -n 1
 
-      - name: Bake weapons and characters
-        shell: bash
-        run: |
-          set -euo pipefail
-          work="${GITHUB_WORKSPACE}/.work/cs2weapons"
-          if python -m extractor.cli cs2weapons \
-            --cs2-dir "${GITHUB_WORKSPACE}/.work/game" \
-            --source2viewer "${GITHUB_WORKSPACE}/tools/source2viewer-cs2/Source2Viewer-CLI" \
-            --output-dir "${work}/package" \
-            --work-dir "${work}/export" > out/cs2-weapons.json; then
-            mv "${work}/package" out/cs2/weapons
-          else
-            echo "::warning::The weapon bake failed; the published weapons are kept."
-          fi
-          rm -rf "${work}"
-
-      - name: Bake sounds
-        shell: bash
-        run: |
-          set -euo pipefail
-          work="${GITHUB_WORKSPACE}/.work/cs2sounds"
-          # shellcheck disable=SC2086
-          if python -m extractor.cli cs2sounds \
-            --cs2-dir "${GITHUB_WORKSPACE}/.work/game" \
-            --source2viewer "${GITHUB_WORKSPACE}/tools/source2viewer-cs2/Source2Viewer-CLI" \
-            --maps ${CS2_MAPS} \
-            --output-dir "${work}/package" \
-            --work-dir "${work}/cache" > out/cs2-sounds.json; then
-            mv "${work}/package" out/cs2/sounds
-          else
-            echo "::warning::The sound bake failed; the published sounds are kept."
-          fi
-          rm -rf "${work}"
-          du -sh out/cs2/* >> "${GITHUB_STEP_SUMMARY}"
-
-      - name: Upload render packages for publication
+      - name: Upload ${{ matrix.target }} for publication
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: cs2-render-${{ needs.version.outputs.build_id }}
+          name: cs2-render-${{ needs.version.outputs.build_id }}-${{ matrix.target }}
           path: out/cs2
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
 
+  # a target whose bake failed keeps its published version (cs2publish carries it over)
   cs2-publish:
-    needs: [version, cs2-bake]
+    needs: [version, gate, cs2-bake]
+    if: always() && needs.gate.outputs.cs2_changed == 'true' && needs.cs2-bake.result != 'cancelled'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -576,8 +564,18 @@ jobs:
       - name: Download render packages
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          name: cs2-render-${{ needs.version.outputs.build_id }}
+          pattern: cs2-render-${{ needs.version.outputs.build_id }}-*
           path: out/cs2
+          merge-multiple: true
+
+      - name: Require a baked map
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$(ls -A out/cs2/maps 2>/dev/null)" ]]; then
+            echo "::error::No map baked; nothing is published."
+            exit 1
+          fi
 
       # uploads changed packages, swaps cs2/index.json, then deletes every older version under cs2/
       - name: Publish render packages to R2

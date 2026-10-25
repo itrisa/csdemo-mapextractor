@@ -235,9 +235,11 @@ deletes every other key under `cs2/`, so the bucket holds one version of each pa
 `bake` key stays `+partial` until that cleanup finishes, and also when a map or package failed to
 bake (it keeps its published version), so the next scheduled run tries again.
 
-The `cs2-bake` job runs when the Steam build or the bake code changes (the `bake` key is the
+The `cs2-bake` jobs run when the Steam build or the bake code changes (the `bake` key is the
 build id plus a digest of `extractor/cs2render`, `extractor/cs2sounds`, `extractor/cs2weapons.py`,
-`extractor/cli.py`, `weapon-bake`, the Source2Viewer build script and the requirements). It builds Source2Viewer-CLI
+`extractor/cli.py`, `weapon-bake`, the Source2Viewer build script and the requirements). There is one job per map,
+plus one for weapons and one for sounds; each downloads CS2 on its own runner, so they bake in
+parallel. A target whose job fails keeps its published version. Each job builds Source2Viewer-CLI
 from a pinned commit (`scripts/build_source2viewer_cs2.sh`), because the bakes rely on export fixes
 that aren't in a release yet, and encodes BC6H without texconv. Run the workflow with `target`
 `classic` or `cs2` to check only one of the two, and with `force` to rebuild regardless.
