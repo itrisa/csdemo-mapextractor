@@ -333,11 +333,12 @@ def _extract_glb(
 
 
 def export_render_world(
-    executable: Path, cs2_dir: Path, map_name: str, output_dir: Path
+    executable: Path, cs2_dir: Path, map_name: str, output_dir: Path, extras: bool = False
 ) -> Path:
     """Export the textured render world (world.gltf, its .bin buffers and PNG textures) into output_dir.
 
     glTF rather than GLB because Source2Viewer cannot write GLBs of 2 GiB or more (de_boulder).
+    extras adds the source material parameters (vmat) and extra vertex streams the CS2 render pipeline needs.
     Returns the directory holding world.gltf; textures are written next to it.
     """
     _validate_map_name(map_name)
@@ -362,6 +363,7 @@ def export_render_world(
             "--gltf_export_format",
             "gltf",
             "--gltf_export_materials",
+            *(["--gltf_export_extras"] if extras else []),
         ],
         timeout=3600,
         cwd=output_dir,
@@ -376,6 +378,65 @@ def export_render_world(
         tail = "\n".join(completed.stderr.splitlines()[-20:])
         raise RuntimeError(f"Source2Viewer did not export a render world for {map_name}:\n{tail}")
     return world.parent
+
+
+def export_map_folder(executable: Path, cs2_dir: Path, map_name: str, folder: str, output_dir: Path) -> Path:
+    """Decompile one map VPK folder (e.g. lightmaps, cubemaps) into output_dir/maps/<map>/<folder>."""
+    _validate_map_name(map_name)
+    map_vpk = (cs2_dir / "game" / "csgo" / "maps" / f"{map_name}.vpk").resolve()
+    if not map_vpk.is_file():
+        raise FileNotFoundError(f"map VPK was not found: {map_vpk}")
+    if Path(executable).is_file():
+        executable = Path(executable).resolve()
+    output_dir = Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    completed = subprocess.run(
+        [str(executable), "-i", str(map_vpk), "-f", f"maps/{map_name}/{folder}/", "-o", str(output_dir), "-d"],
+        timeout=3600,
+        cwd=output_dir,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+    )
+    result = output_dir / "maps" / map_name / folder
+    if completed.returncode != 0 or not result.is_dir() or not any(result.iterdir()):
+        tail = "\n".join(completed.stderr.splitlines()[-20:])
+        raise RuntimeError(f"Source2Viewer did not export maps/{map_name}/{folder}:\n{tail}")
+    return result
+
+
+def export_resource(executable: Path, vpk: Path, resource: str, output_dir: Path) -> None:
+    """Decompiles one compiled resource (e.g. a .vtex_c, written as an image) into output_dir."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    completed = subprocess.run(
+        [str(executable), "-i", str(vpk), "-f", resource, "-o", str(output_dir), "-d"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=600,
+    )
+    if completed.returncode != 0:
+        tail = "\n".join(completed.stderr.splitlines()[-20:])
+        raise RuntimeError(f"Source2Viewer could not export {resource}:\n{tail}")
+
+
+def extract_resource_block(executable: Path, vpk: Path, resource: str, block: str = "DATA") -> str:
+    """Prints one block of a compiled resource (e.g. a .vpost_c) as text."""
+    completed = subprocess.run(
+        [str(executable), "-i", str(vpk), "-f", resource, "--block", block],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=600,
+    )
+    marker = f'--- Data for block "{block}" ---'
+    if marker not in completed.stdout:
+        raise RuntimeError(f"Source2Viewer printed no {block} block for {resource}")
+    return completed.stdout.split(marker, 1)[1]
 
 
 def cs2_client_version(cs2_dir: Path) -> str | None:
